@@ -22,6 +22,7 @@
 #
 bin
 build
+run
 build_linux
 tags
 TAGS
