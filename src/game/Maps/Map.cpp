@@ -162,7 +162,7 @@ Map::Map(uint32 id, time_t expiry, uint32 InstanceId)
 #ifdef ENABLE_PLAYERBOTS
       m_activeZonesTimer(0), hasRealPlayers(false),
 #endif
-      m_variableManager(this)
+      m_variableManager(this), m_pendingReset(false)
 {
     m_weatherSystem = new WeatherSystem(this);
 }
@@ -2539,24 +2539,85 @@ void Map::RemoveStringIdObject(uint32 stringId, WorldObject* obj)
         data.gameobjects.erase(std::remove(data.gameobjects.begin(), data.gameobjects.end(), static_cast<GameObject*>(obj)), data.gameobjects.end());
 }
 
+void Map::ScheduleMapReset()
+{
+    // Guard against re-entrant reset if multiple GUIDs overflow in the same tick
+    if (m_pendingReset)
+        return;
+    m_pendingReset = true;
+
+    sLog.outError("Map %u GUID overflow — evacuating all players/bots and resetting map.", GetId());
+
+    // Collect players first — teleporting modifies m_mapRefManager mid-iteration
+    std::vector<Player*> toEject;
+    for (auto ref = m_mapRefManager.getFirst(); ref; ref = ref->next())
+        if (Player* player = ref->getSource())
+            toEject.push_back(player);
+
+    for (Player* player : toEject)
+    {
+        
+        // If the player's hearthstone is on THIS map, send to racial capital instead
+        // to avoid looping them back into a map that just reset
+        //  -- Why not? lets just try to kick them instead
+
+        play->GetSession()->PlayerLogout()
+
+        /*
+         * if (player->m_homebindMapId == GetId())
+         * {
+         *     if (player->GetTeam() == ALLIANCE)
+         *         player->TeleportTo(0, -8833.37f, 628.62f, 94.0f, 0.0f);   // Stormwind
+         *     else
+         *         player->TeleportTo(1, 1569.59f, -4397.63f, 16.06f, 0.0f); // Orgrimmar
+         * }
+         * else
+         * {
+         *     player->TeleportToHomebind();
+         * }
+         */
+    }
+
+    // Unload all grids — despawns all creatures and game objects
+    UnloadAll(true);
+
+    // Reset all GUID counters back to the post-static-spawn baseline
+    m_CreatureGuids.Set(sObjectMgr.GetFirstTemporaryCreatureLowGuid());
+    m_GameObjectGuids.Set(sObjectMgr.GetFirstTemporaryGameObjectLowGuid());
+    m_DynObjectGuids.Set(sObjectMgr.GetFirstTemporaryCreatureLowGuid());
+    m_PetGuids.Set(sObjectMgr.GetFirstTemporaryCreatureLowGuid());
+
+    m_pendingReset = false;
+    sLog.outBasic("Map %u reset complete. GUID counters restored. Grids will reload on next player entry.", GetId());
+}
+
 uint32 Map::GenerateLocalLowGuid(HighGuid guidhigh)
 {
-    // TODO: for map local guid counters possible force reload map instead shutdown server at guid counter overflow
+    uint32 newGuid = 0;
     switch (guidhigh)
     {
         case HIGHGUID_UNIT:
-            return m_CreatureGuids.Generate();
+          newGuid = m_CreatureGuids.Generate();
+          break;
         case HIGHGUID_TRANSPORT:
         case HIGHGUID_GAMEOBJECT:
-            return m_GameObjectGuids.Generate();
+          newGuid = m_GameObjectGuids.Generate();
+          break;
         case HIGHGUID_DYNAMICOBJECT:
-            return m_DynObjectGuids.Generate();
+          newGuid = m_DynObjectGuids.Generate();
+          break;
         case HIGHGUID_PET:
-            return m_PetGuids.Generate();
+          newGuid = m_PetGuids.Generate();
+          break;
         default:
-            MANGOS_ASSERT(false);
-            return 0;
+          MANGOS_ASSERT(false);
+          return 0;
     }
+
+    if (newGuid == 0)  // sentinel returned by ObjectGuidGenerator on overflow
+        ScheduleMapReset();
+
+    return newGuid;
 }
 
 /**
