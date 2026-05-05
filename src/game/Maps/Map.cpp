@@ -2561,7 +2561,7 @@ void Map::ScheduleMapReset()
         // to avoid looping them back into a map that just reset
         //  -- Why not? lets just try to kick them instead
 
-        player->GetSession()->PlayerLogout();
+        player->GetSession()->PlayerLogout()
 
         /*
          * if (player->m_homebindMapId == GetId())
