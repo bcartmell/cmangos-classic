@@ -1,7 +1,7 @@
 !#/bin/bash
 
-mkdir /home/ubuntu/wow/mangos-classic/build/
-cd /home/ubuntu/wow/mangos-classic/build/
+mkdir /opt/cmangos/build/
+cd /opt/cmangos/build/
 
 abort() {
   echo "Encoundered Error: $1"
