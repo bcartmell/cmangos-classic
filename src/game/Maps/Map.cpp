@@ -2556,12 +2556,12 @@ void Map::ScheduleMapReset()
 
     for (Player* player : toEject)
     {
-
+        
         // If the player's hearthstone is on THIS map, send to racial capital instead
         // to avoid looping them back into a map that just reset
         //  -- Why not? lets just try to kick them instead
 
-        player->GetSession()->PlayerLogout()
+        play->GetSession()->PlayerLogout()
 
         /*
          * if (player->m_homebindMapId == GetId())
