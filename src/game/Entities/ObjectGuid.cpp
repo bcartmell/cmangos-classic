@@ -65,8 +65,8 @@ uint32 ObjectGuidGenerator<high>::Generate()
 {
     if (m_nextGuid >= ObjectGuid::GetMaxCounter(high) - 1000)
     {
-        sLog.outError("%s guid overflow very close!! Can't continue, shutting down server. ", ObjectGuid::GetTypeName(high));
-        World::StopNow(ERROR_EXIT_CODE);
+        sLog.outError("%s guid overflow very close!! Triggering map reset.", ObjectGuid::GetTypeName(high));
+        return 0;  // sentinel value — caller (Map::GenerateLocalLowGuid) handles the reset
     }
     return m_nextGuid++;
 }
