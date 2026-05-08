@@ -8,6 +8,6 @@ abort() {
   exit 1
 }
 
-cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cmangos/run -DBUILD_EXTRACTORS=ON -DPCH=1 -DDEBUG=0 -DBUILD_PLAYERBOTS=ON -DBUILD_AHBOT=ON || abort "cmake failed"
-make -j 4                                                                                                                           || abort "make failed"
-make install                                                                                                                        || abort "make install failed"
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cmangos/run -DBUILD_EXTRACTORS=OFF -DPCH=1 -DDEBUG=0 -DBUILD_PLAYERBOTS=ON -DBUILD_AHBOT=ON || abort "cmake failed"
+make -j 4                                                                                                                       || abort "make failed"
+make install                                                                                                                    || abort "make install failed"
