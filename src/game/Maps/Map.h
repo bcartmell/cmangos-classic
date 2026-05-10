@@ -324,7 +324,6 @@ class Map : public GridRefManager<NGridType>
 
         // Teleport all players in that map to choosed location
         void TeleportAllPlayersTo(TeleportLocation loc);
-        void ScheduleMapReset();
 
         // WeatherSystem
         WeatherSystem* GetWeatherSystem() const { return m_weatherSystem; }
@@ -459,7 +458,6 @@ class Map : public GridRefManager<NGridType>
         // Shared geodata object with map coord info...
         TerrainInfo* const m_TerrainData;
         bool m_bLoadedGrids[MAX_NUMBER_OF_GRIDS][MAX_NUMBER_OF_GRIDS];
-        bool m_pendingReset;
 
         std::bitset<TOTAL_NUMBER_OF_CELLS_PER_MAP* TOTAL_NUMBER_OF_CELLS_PER_MAP> marked_cells;
 
