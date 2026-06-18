@@ -1,5 +1,7 @@
 !#/bin/bash
 
+JOBS_COUNT=${1:-3}
+
 mkdir /opt/cmangos/build/
 cd /opt/cmangos/build/
 
@@ -9,5 +11,5 @@ abort() {
 }
 
 cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cmangos/run -DBUILD_EXTRACTORS=OFF -DPCH=1 -DDEBUG=0 -DBUILD_PLAYERBOTS=ON -DBUILD_AHBOT=ON || abort "cmake failed"
-make -j 4                                                                                                                        || abort "make failed"
+make -j $JOBS_COUNT                                                                                                              || abort "make failed"
 make install                                                                                                                     || abort "make install failed"
