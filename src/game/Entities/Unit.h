@@ -1069,6 +1069,15 @@ struct SelectAttackingTargetParams
 
 struct SpellProcEventEntry;                                 // used only privately
 
+enum SwingErrors
+{
+    SWING_ERROR_NONE,
+    SWING_ERROR_NOT_IN_RANGE,
+    SWING_ERROR_TARGET_NOT_ALIVE,
+    SWING_ERROR_BAD_FACING,
+    SWING_ERROR_CANT_ATTACK_TARGET,
+};
+
 class Unit : public WorldObject
 {
     public:
@@ -1298,7 +1307,7 @@ class Unit : public WorldObject
         bool HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel = nullptr, uint32 excludeAuraApplyMSTimeCutoff = 0) const;
         bool HasBreakableByDamageAuraType(AuraType type, uint32 excludeAura, uint32 excludeAuraApplyMSTimeCutoff) const;
         bool HasAuraPetShouldAvoidBreaking(Unit* excludeCasterChannel = nullptr, uint32 excludeAuraApplyMSTimeCutoff = 0) const;
-        void SendMeleeAttackStop(const Unit& victim) const;
+        void SendMeleeAttackStop(Unit const* victim) const;
         void SendMeleeAttackStart(const Unit& victim) const;
 
         void addUnitState(uint32 f) { m_state |= f; }
@@ -1313,19 +1322,18 @@ class Unit : public WorldObject
 
         uint32 GetLevel() const override { return GetUInt32Value(UNIT_FIELD_LEVEL); }
         uint8 getRace() const { return GetByteValue(UNIT_FIELD_BYTES_0, UNIT_BYTES_0_OFFSET_RACE); }
-        uint32 getRaceMask() const { return 1 << (getRace() - 1); }
+        uint32 getRaceMask() const { return convertEnumToFlag(getRace()); }
         uint8 getClass() const { return GetByteValue(UNIT_FIELD_BYTES_0, UNIT_BYTES_0_OFFSET_CLASS); }
-        uint32 getClassMask() const { return 1 << (getClass() - 1); }
+        uint32 getClassMask() const { return convertEnumToFlag(getClass()); }
         uint8 getGender() const { return GetByteValue(UNIT_FIELD_BYTES_0, UNIT_BYTES_0_OFFSET_GENDER); }
 
-        float GetStat(Stats stat) const { return float(GetUInt32Value(UNIT_FIELD_STAT0 + stat)); }
-        void SetStat(Stats stat, int32 val) { SetStatInt32Value(UNIT_FIELD_STAT0 + stat, val); }
+        float GetStat(Stats stat) const { return float(GetUInt32Value(static_cast<uint16>(UNIT_FIELD_STAT0) + static_cast<uint16>(stat))); }
+        void SetStat(Stats stat, int32 val) { SetStatInt32Value(static_cast<uint16>(UNIT_FIELD_STAT0) + static_cast<uint16>(stat), val); }
 
         inline int32 GetArmor() const { return GetResistance(SPELL_SCHOOL_NORMAL) ; }
-        inline void SetArmor(int32 val) { SetStatInt32Value(UNIT_FIELD_RESISTANCES, val); }
-
-        inline int32 GetResistance(SpellSchools school) const { return GetInt32Value(UNIT_FIELD_RESISTANCES + school); }
-        inline void SetResistance(SpellSchools school, int32 val) { SetInt32Value(UNIT_FIELD_RESISTANCES + school, val); }
+        inline void SetArmor(int32 val) { SetStatInt32Value(static_cast<uint16>(UNIT_FIELD_RESISTANCES), val); }
+        inline int32 GetResistance(SpellSchools school) const { return GetInt32Value(static_cast<uint16>(UNIT_FIELD_RESISTANCES) + static_cast<uint16>(school)); }
+        inline void SetResistance(SpellSchools school, int32 val) { SetInt32Value(static_cast<uint16>(UNIT_FIELD_RESISTANCES) + static_cast<uint16>(school), val); }
 
         uint32 GetHealth()    const { return GetUInt32Value(UNIT_FIELD_HEALTH); }
         uint32 GetMaxHealth() const { return GetUInt32Value(UNIT_FIELD_MAXHEALTH); }
@@ -1339,8 +1347,8 @@ class Unit : public WorldObject
 
         Powers GetPowerType() const { return Powers(GetByteValue(UNIT_FIELD_BYTES_0, UNIT_BYTES_0_OFFSET_POWER_TYPE)); }
         void SetPowerType(Powers new_powertype);
-        uint32 GetPower(Powers power) const { return GetUInt32Value(UNIT_FIELD_POWER1 + power); }
-        uint32 GetMaxPower(Powers power) const { return GetUInt32Value(UNIT_FIELD_MAXPOWER1 + power); }
+        uint32 GetPower(Powers power) const { return GetUInt32Value(static_cast<uint16>(UNIT_FIELD_POWER1) + static_cast<uint16>(power)); }
+        uint32 GetMaxPower(Powers power) const { return GetUInt32Value(static_cast<uint16>(UNIT_FIELD_MAXPOWER1) + static_cast<uint16>(power)); }
         float GetPowerPercent() const { return (GetMaxPower(GetPowerType()) == 0) ? 0.0f : (GetPower(GetPowerType()) * 100.0f) / GetMaxPower(GetPowerType()); }
         float GetPowerPercent(Powers power) const { return (GetMaxPower(power) == 0) ? 0.0f : (GetPower(power) * 100.0f) / GetMaxPower(power); }
         void SetPower(Powers power, uint32 val);
@@ -1351,8 +1359,8 @@ class Unit : public WorldObject
         void ApplyMaxPowerMod(Powers power, uint32 val, bool apply);
         bool HasMana() { return GetPowerType() == POWER_MANA; }
 
-        uint32 GetAttackTime(WeaponAttackType att) const { return (uint32)(GetFloatValue(UNIT_FIELD_BASEATTACKTIME + att) / m_modAttackSpeedPct[att]); }
-        void SetAttackTime(WeaponAttackType att, uint32 val) { SetFloatValue(UNIT_FIELD_BASEATTACKTIME + att, val * m_modAttackSpeedPct[att]); }
+        uint32 GetAttackTime(WeaponAttackType att) const { return (uint32)(GetFloatValue(static_cast<uint16>(UNIT_FIELD_BASEATTACKTIME) + static_cast<uint16>(att)) / m_modAttackSpeedPct[att]); }
+        void SetAttackTime(WeaponAttackType att, uint32 val) { SetFloatValue(static_cast<uint16>(UNIT_FIELD_BASEATTACKTIME) + static_cast<uint16>(att), val * m_modAttackSpeedPct[att]); }
         void ApplyAttackTimePercentMod(WeaponAttackType att, float val, bool apply);
         void ApplyCastTimePercentMod(float val, bool apply);
 
@@ -1432,7 +1440,7 @@ class Unit : public WorldObject
         uint32 GetCreatureTypeMask() const
         {
             uint32 creatureType = GetCreatureType();
-            return (creatureType >= 1) ? (1 << (creatureType - 1)) : 0;
+            return (creatureType >= 1) ? convertEnumToFlag(creatureType) : 0;
         }
 
         uint8 getStandState() const { return GetByteValue(UNIT_FIELD_BYTES_1, UNIT_BYTES_1_OFFSET_STAND_STATE); }
@@ -1650,6 +1658,7 @@ class Unit : public WorldObject
             return m_spellAuraHolders.find(spellId) != m_spellAuraHolders.end();
         }
         bool HasAuraTypeWithCaster(AuraType auratype, ObjectGuid caster) const;
+        bool HasPeriodicAura() const;
         bool HasMechanicMaskOrDispelMaskAura(uint32 dispelMask, uint32 mechanicMask, Unit const* caster) const;
         bool HasNegativeAuraWithInterruptFlag(SpellAuraInterruptFlags flag) const;
         template<typename Func>
@@ -1762,7 +1771,7 @@ class Unit : public WorldObject
         void SendEnchantmentLog(ObjectGuid targetGuid, uint32 itemEntry, uint32 enchantId) const;
 
         static void CasterHitTargetWithSpell(Unit* realCaster, Unit* target, SpellEntry const* spellInfo, bool triggered, bool success = true);
-        bool CanInitiateAttack() const;
+        virtual bool CanInitiateAttack() const;
 
         Unit* SelectAttackingTarget(AttackingTarget target, uint32 position, uint32 spellId, uint32 selectFlags = 0, SelectAttackingTargetParams params = SelectAttackingTargetParams(), int32 unitConditionId = 0) const;
         Unit* SelectAttackingTarget(AttackingTarget target, uint32 position, SpellEntry const* spellInfo = nullptr, uint32 selectFlags = 0, SelectAttackingTargetParams params = SelectAttackingTargetParams(), int32 unitConditionId = 0) const;
@@ -2160,7 +2169,7 @@ class Unit : public WorldObject
         uint32 CalculateDamage(WeaponAttackType attType, bool normalized, uint8 index = 0);
         float GetAPMultiplier(WeaponAttackType attType, bool normalized);
         void ModifyAuraState(AuraState flag, bool apply);
-        bool HasAuraState(AuraState flag) const { return HasFlag(UNIT_FIELD_AURASTATE, 1 << (flag - 1)); }
+        bool HasAuraState(AuraState flag) const { return HasFlag(UNIT_FIELD_AURASTATE, convertEnumToFlag(flag)); }
         void UnsummonAllTotems() const;
         Unit* SelectMagnetTarget(Unit* victim, Spell* spell = nullptr);
 
@@ -2325,6 +2334,7 @@ class Unit : public WorldObject
 
         // group updates
         void UpdateAuraForGroup(uint8 slot);
+        Player* GetGroupUpdatePetMaster() const;
 
         // pet auras
         typedef std::set<PetAura const*> PetAuraSet;
@@ -2354,9 +2364,11 @@ class Unit : public WorldObject
         virtual bool CanFly() const = 0;
         virtual bool CanWalk() const = 0;
         virtual bool CanBeDetected() const { return true; }
-        virtual bool IsFlying() const { return m_movementInfo.HasMovementFlag(MOVEFLAG_FLYING); }
+        virtual bool IsFlying() const { return m_movementInfo.HasMovementFlag(MOVEFLAG_LEVITATING); }
 
         void ForceHealthAndPowerUpdate();   // force server to send new value for hp and power (including max)
+
+        void SendMessageToAllWhoSeeMeMove(WorldPacket const& data, ObjectGuid mover) const;
 
         // Take possession of an unit (pet, creature, ...)
         bool TakePossessOf(Unit* possessed);
@@ -2428,6 +2440,9 @@ class Unit : public WorldObject
 
         uint32 GetDamageDoneByOthers() { return m_damageByOthers; }
         uint32 GetModifierXpBasedOnDamageReceived(uint32 xp);
+
+        void UpdateNextUpdateTime() override;
+        uint32 ShouldPerformObjectUpdate(uint32 const diff) override;
 
         void UpdateSplinePosition(bool relocateOnly = false);
         void SendFlightSplineSyncIfNeeded();
@@ -2608,6 +2623,7 @@ class Unit : public WorldObject
         Position m_last_notified_position;
         BasicEvent* m_AINotifyEvent;
         ShortTimeTracker m_movesplineTimer;
+        bool m_hasPeriodicAura;
 
         Diminishing m_Diminishing;
 

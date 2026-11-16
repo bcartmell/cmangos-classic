@@ -24,6 +24,7 @@
 #include "Util/ByteBuffer.h"
 #include "Entities/UpdateFields.h"
 #include "Entities/UpdateData.h"
+#include "Entities/UpdateMask.h"
 #include "Entities/ObjectGuid.h"
 #include "Entities/EntitiesMgr.h"
 #include "Globals/SharedDefines.h"
@@ -111,8 +112,6 @@ struct ItemPrototype;
 class ChatHandler;
 struct SpellEntry;
 class GenericTransport;
-
-typedef std::unordered_map<Player*, UpdateData> UpdateDataMapType;
 
 class CooldownData
 {
@@ -220,32 +219,7 @@ class CooldownContainer
             }
         }
 
-        bool AddCooldown(TimePoint clockNow, uint32 spellId, uint32 duration, uint32 spellCategory = 0, uint32 categoryDuration = 0, uint32 itemId = 0, bool onHold = false)
-        {
-            RemoveBySpellId(spellId);
-            auto resultItr = m_spellIdMap.emplace(spellId, std::make_unique<CooldownData>(clockNow, spellId, duration, spellCategory, categoryDuration, itemId, onHold));
-            // do not overwrite one permanent category cooldown with another permanent category cooldown
-            if (resultItr.second && spellCategory && categoryDuration)
-            {
-                auto catItr = FindByCategory(spellCategory);
-                if (!onHold || catItr == m_spellIdMap.end() || !catItr->second->IsPermanent())
-                {
-                    // we must keep original category cd owner for sake of client sync
-                    if (catItr != m_spellIdMap.end())
-                    {
-                        catItr->second->SetCatCDExpireTime(std::chrono::milliseconds(categoryDuration) + clockNow);
-                        catItr->second->m_typePermanent = false;
-                        resultItr.first->second->m_category = 0;
-                    }
-                    else
-                        m_categoryMap.emplace(spellCategory, resultItr.first);
-                }
-                else
-                    resultItr.first->second->m_category = 0;
-            }
-
-            return resultItr.second;
-        }
+        bool AddCooldown(TimePoint clockNow, uint32 spellId, uint32 duration, uint32 spellCategory = 0, uint32 categoryDuration = 0, uint32 itemId = 0, bool onHold = false);
 
         void RemoveBySpellId(uint32 spellId)
         {
@@ -300,9 +274,12 @@ class CooldownContainer
         bool IsEmpty() const { return m_spellIdMap.empty(); }
         size_t size() const { return m_spellIdMap.size(); }
 
+        bool IsGlobalCooldownExpired(TimePoint& now) const;
+
     private:
         spellIdMap m_spellIdMap;
         categoryMap m_categoryMap;
+        TimePoint m_globalCooldown;
 };
 
 struct Position
@@ -395,22 +372,35 @@ class Object
         uint8 GetTypeMask() const { return m_objectType; }
         bool isType(TypeMask mask) const { return (mask & m_objectType) != 0; }
 
-        virtual void BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const;
-        void SendCreateUpdateToPlayer(Player* player) const;
+        virtual void BuildCreateUpdateBlockForPlayer(UpdateData& data, Player* target) const;
 
         // must be overwrite in appropriate subclasses (WorldObject, Item currently), or will crash
         virtual void AddToClientUpdateList();
         virtual void RemoveFromClientUpdateList();
-        virtual void BuildUpdateData(UpdateDataMapType& update_players);
+        // decides which clients start or stop seeing the object (Player::ScheduleCreate, Player::ScheduleOutOfRange)
+        virtual void UpdateVisibility() = 0;
+        // writes the changed values into the update packet of each client that has the object, then clears the field marks
+        virtual void BuildUpdateData() = 0;
         void MarkForClientUpdate();
-        void SendForcedObjectUpdate();
 
-        void BuildValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const;
+        // Values block of this object for each of its clients: the changed fields are listed once, at the first client,
+        // then each client gets those its update field flags let it see, with the values computed for it
+        class ChangedValuesWriter
+        {
+            public:
+                explicit ChangedValuesWriter(Object const& object) : m_object(object), m_fieldsListed(false) {}
+                void WriteFor(Player* client);              // into the client's update packet
+
+            private:
+                Object const& m_object;
+                bool m_fieldsListed;
+                std::vector<uint16> m_changedFields;
+                UpdateMask m_visibleFields;
+        };
+
         void BuildValuesUpdateBlockForPlayerWithFlags(UpdateData& data, Player* target, UpdateFieldFlags flags) const;
         void BuildValuesUpdateBlockForPlayer(UpdateData& data, UpdateMask& updateMask, Player* target) const;
-        void BuildForcedValuesUpdateBlockForPlayer(UpdateData* data, Player* target) const;
-        void BuildOutOfRangeUpdateBlock(UpdateData* data) const;
-        void BuildMovementUpdateBlock(UpdateData* data, uint8 flags = 0) const;
+        void BuildForcedValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const;
 
         virtual void DestroyForPlayer(Player* target) const;
 
@@ -483,6 +473,7 @@ class Object
         }
 
         void ForceValuesUpdateAtIndex(uint16 index);
+        void ForceValuesUpdateForFlag(uint16 flag);
         void MarkUpdateFieldsWithFlagForUpdate(UpdateMask& updateMask, uint16 flag) const;
 
         void SetFlag(uint16 index, uint32 newFlag);
@@ -606,6 +597,7 @@ class Object
         virtual bool HasQuest(uint32 /* quest_id */) const { return false; }
         virtual bool HasInvolvedQuest(uint32 /* quest_id */) const { return false; }
         void SetItsNewObject(bool enable) { m_itsNewObject = enable; }
+        bool ItsNewObject() const { return m_itsNewObject; }
 
         Loot* m_loot;
 
@@ -624,12 +616,10 @@ class Object
         void _Create(uint32 dbGuid, uint32 guidlow, uint32 entry, HighGuid guidhigh);
 
         uint16 GetUpdateFieldFlagsForTarget(Player const* target, uint16 const*& flags) const;
-        void _SetUpdateBits(UpdateMask& updateMask, Player* target) const;
         void _SetCreateBits(UpdateMask& updateMask, Player* target) const;
 
-        void BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const;
+        void BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags, Player const* target) const;
         void BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* updateMask, Player* target) const;
-        void BuildUpdateDataForPlayer(Player* pl, UpdateDataMapType& update_players) const;
 
         uint16 m_objectType;
 
@@ -669,7 +659,7 @@ class Object
         bool PrintEntryError(char const* descr) const;
 };
 
-struct WorldObjectChangeAccumulator;
+struct WorldObjectCreateAccumulator;
 
 struct TempSpawnSettings
 {
@@ -734,8 +724,9 @@ enum MovementFlags
     MOVEFLAG_PITCH_DOWN         = 0x00000080,
     MOVEFLAG_WALK_MODE          = 0x00000100,               // Walking
 
-    MOVEFLAG_LEVITATING         = 0x00000400,
-    MOVEFLAG_FLYING             = 0x00000800,               // [-ZERO] is it really need and correct value
+    MOVEFLAG_KEEP_SWIM_STATE    = 0x00000400,               // the client neither starts nor stops swimming by itself
+    MOVEFLAG_LEVITATING         = 0x00000800,
+    MOVEFLAG_ROOT               = 0x00001000,
     MOVEFLAG_JUMPING            = 0x00002000,
     MOVEFLAG_FALLINGFAR         = 0x00004000,
     MOVEFLAG_SWIMMING           = 0x00200000,               // appears with fly flag also
@@ -745,7 +736,6 @@ enum MovementFlags
 
     MOVEFLAG_ONTRANSPORT        = 0x02000000,               // Used for flying on some creatures
     MOVEFLAG_SPLINE_ELEVATION   = 0x04000000,               // used for flight paths
-    MOVEFLAG_ROOT               = 0x08000000,               // used for flight paths
     MOVEFLAG_WATERWALKING       = 0x10000000,               // prevent unit from falling through water
     MOVEFLAG_SAFE_FALL          = 0x20000000,               // active rogue safe fall spell (passive)
     MOVEFLAG_HOVER              = 0x40000000,
@@ -874,10 +864,10 @@ inline ByteBuffer& operator>> (ByteBuffer& buf, MovementInfo& mi)
 
 class WorldObject : public Object
 {
-        friend struct WorldObjectChangeAccumulator;
+        friend struct WorldObjectCreateAccumulator;
 
     public:
-        virtual ~WorldObject() {}
+        virtual ~WorldObject() override;
 
         virtual void Update(const uint32 /*diff*/);
         virtual void Heartbeat() {}
@@ -1070,8 +1060,8 @@ class WorldObject : public Object
 
         virtual void SaveRespawnTime() {}
         void AddObjectToRemoveList();
+        bool m_inRemoveList;
 
-        void UpdateObjectVisibility();
         virtual void UpdateVisibilityAndView();             // update visibility for object and object for all around
 
         // main visibility check function in normal case (ignore grey zone distance check)
@@ -1090,8 +1080,13 @@ class WorldObject : public Object
 
         void AddToClientUpdateList() override;
         void RemoveFromClientUpdateList() override;
-        void BuildUpdateData(UpdateDataMapType&) override;
-        
+        void BuildUpdateData() override;
+        void UpdateVisibility() override;
+        // sends the changed values now instead of at the next client update tick
+        void SendForcedObjectUpdate();
+        // number of transports carrying the object, 0 if none
+        uint32 GetCarrierDepth() const;
+
         static Creature* SummonCreature(TempSpawnSettings settings, Map* map);
         Creature* SummonCreature(uint32 id, float x, float y, float z, float ang, TempSpawnType spwtype, uint32 despwtime, bool asActiveObject = false, bool setRun = false, uint32 pathId = 0, uint32 faction = 0, uint32 modelId = 0, bool spawnCounting = false, bool forcedOnTop = false);
 
@@ -1124,7 +1119,7 @@ class WorldObject : public Object
         void RemoveSpellCooldown(uint32 spellId, bool updateClient = true);
         virtual void RemoveSpellCategoryCooldown(uint32 category, bool updateClient = true);
         virtual void RemoveAllCooldowns(bool /*sendOnly*/ = false) { m_GCDCatMap.clear(); m_cooldownMap.clear(); m_lockoutMap.clear(); }
-        bool IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto = nullptr) const;
+        bool IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto = nullptr, bool itemCategoryOnly = false) const;
         bool IsSpellReady(uint32 spellId, ItemPrototype const* itemProto = nullptr) const;
         bool IsSpellOnPermanentCooldown(SpellEntry const& spellEntry) const;
         virtual void LockOutSpells(SpellSchoolMask schoolMask, uint32 duration);
@@ -1139,6 +1134,14 @@ class WorldObject : public Object
 
         VisibilityData const& GetVisibilityData() const { return m_visibilityData; }
         VisibilityData& GetVisibilityData() { return m_visibilityData; }
+
+        virtual uint32 GetNextUpdateTime() { return m_nextUpdateTime; }
+        virtual void SetNextUpdateTime(uint32 time) { m_nextUpdateTime = time; }
+        virtual void UpdateNextUpdateTime() {}
+        uint32 GetAccumulatedUpdateDiff() { return m_accumulatedUpdateDiff; }
+        void ResetAccumulatedUpdateDiff() { m_accumulatedUpdateDiff = 0; }
+
+        virtual uint32 ShouldPerformObjectUpdate(uint32 const diff);
 
         bool HaveDebugFlag(CMDebugFlags flag) const { return (uint64(m_debugFlags) & flag) != 0; }
         void SetDebugFlag(CMDebugFlags flag) { m_debugFlags |= uint64(flag); }
@@ -1162,7 +1165,12 @@ class WorldObject : public Object
 
         void AddClientIAmAt(Player const* player);
         void RemoveClientIAmAt(Player const* player);
+        GuidSet const& GetClientGuidsIAmAt() const { return m_clientGUIDsIAmAt; }
         GuidSet& GetClientGuidsIAmAt() { return m_clientGUIDsIAmAt; }
+
+        void DestroyOnClientsIAmAt();
+        // the object leaves the view of all its clients: out of range in their next update packet
+        void ScheduleOutOfRangeOnClientsIAmAt();
 
         // Event handler
         EventProcessor m_events;
@@ -1212,6 +1220,9 @@ class WorldObject : public Object
 
         VisibilityData m_visibilityData;
 
+        uint32 m_nextUpdateTime;
+        uint32 m_accumulatedUpdateDiff;
+
         ShortTimeTracker m_heartBeatTimer;
     private:
         Map* m_currMap;                                     // current object's Map location
@@ -1224,6 +1235,7 @@ class WorldObject : public Object
         bool m_isActiveObject;
         uint64 m_debugFlags;
 
+        GuidVector m_pendingViewers;                        // list of players that spotted me this map tick
         GuidSet m_clientGUIDsIAmAt;
 
         // Spell System compliance

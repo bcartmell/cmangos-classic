@@ -36,6 +36,7 @@ class Player;
 class Pet;
 class DynamicObject;
 class Corpse;
+class UpdateData;
 struct CreatureData;
 struct GameObjectData;
 

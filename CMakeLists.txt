@@ -207,6 +207,13 @@ endif()
 # Find needed packages and if necessery abort if something important is missing
 find_package(Boost 1.70.0 REQUIRED COMPONENTS program_options thread regex serialization filesystem)
 
+if (APPLE)
+    find_package(ICU COMPONENTS uc i18n data REQUIRED)
+    add_library(icuuc ALIAS ICU::uc)
+    add_library(icui18n ALIAS ICU::i18n)
+    add_library(icudata ALIAS ICU::data)
+endif()
+
 if(NOT Boost_FOUND AND (BUILD_GAME_SERVER OR BUILD_LOGIN_SERVER))
   message(STATUS "BOOST_ROOT = $ENV{BOOST_ROOT}")
   message(STATUS "BOOST_LIBRARYDIR = $ENV{BOOST_LIBRARYDIR}")
@@ -318,17 +325,14 @@ if(NOT BUILD_GAME_SERVER AND BUILD_SCRIPTDEV)
   message(STATUS "BUILD_SCRIPTDEV forced to OFF due to BUILD_GAME_SERVER is not set")
 endif()
 
-if(NOT BUILD_GAME_SERVER AND BUILD_DEPRECATED_PLAYERBOT)
-  set(BUILD_DEPRECATED_PLAYERBOT OFF)
-  message(STATUS "BUILD_DEPRECATED_PLAYERBOT forced to OFF due to BUILD_GAME_SERVER is not set")
+if(BUILD_DEPRECATED_PLAYERBOT)
+  message(FATAL_ERROR "BUILD_DEPRECATED_PLAYERBOT is no longer available: the old built-in playerbot has been removed.\n"
+    "Build the playerbots module instead (-DBUILD_PLAYERBOTS=ON) and set AiPlayerbot.PartyBotOnly = 1 in aiplayerbot.conf "
+    "to keep only player-controlled party bots (see docs/OldPartyBot.md in the module).\n"
+    "Configure again with -DBUILD_DEPRECATED_PLAYERBOT=OFF to go on.")
 endif()
 
 if(BUILD_PLAYERBOTS)
-  if(BUILD_DEPRECATED_PLAYERBOT)
-    set(BUILD_DEPRECATED_PLAYERBOT OFF)
-    message(STATUS "BUILD_DEPRECATED_PLAYERBOT forced to OFF because BUILD_PLAYERBOTS is set")
-  endif()
-
   if(NOT BUILD_GAME_SERVER)
     set(BUILD_PLAYERBOTS OFF)
     message(STATUS "BUILD_PLAYERBOTS forced to OFF due to BUILD_GAME_SERVER is not set")

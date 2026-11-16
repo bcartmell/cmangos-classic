@@ -49,7 +49,7 @@ void Camera::UpdateForCurrentViewPoint()
     if (GridType* grid = m_source->GetViewPoint().m_grid)
         grid->AddWorldObject(this);
 
-    UpdateVisibilityForOwner();
+    m_source->GetMap()->AddUpdateCreateObject(m_source);
 }
 
 void Camera::SetView(WorldObject* obj, bool update_far_sight_field /*= true*/)
@@ -101,13 +101,19 @@ void Camera::ResetView(bool update_far_sight_field /*= true*/)
     SetView(&m_owner, update_far_sight_field);
 }
 
-void Camera::Event_AddedToWorld()
+void Camera::Event_AddedToWorld(UpdateData* data)
 {
     GridType* grid = m_source->GetViewPoint().m_grid;
     MANGOS_ASSERT(grid);
     grid->AddWorldObject(this);
 
-    UpdateVisibilityForOwner(true);
+    if (data)
+    {
+        if (m_source == &m_owner)
+            UpdateVisibilityForOwner(*data);
+        else
+            UpdateVisibilityForOwner();                     // data is the packet of the viewpoint, not of this camera's owner
+    }
 }
 
 void Camera::Event_RemovedFromWorld()
@@ -132,23 +138,17 @@ void Camera::UpdateVisibilityOf(WorldObject* target) const
     m_owner.UpdateVisibilityOf(m_source, target);
 }
 
-template<class T>
-void Camera::UpdateVisibilityOf(T* target, UpdateData& data, WorldObjectSet& vis)
-{
-    m_owner.UpdateVisibilityOf<T>(m_source, target, data, vis);
-}
-
-template void Camera::UpdateVisibilityOf(Player*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(Creature*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(Corpse*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(GameObject*, UpdateData&, WorldObjectSet&);
-template void Camera::UpdateVisibilityOf(DynamicObject*, UpdateData&, WorldObjectSet&);
-
-void Camera::UpdateVisibilityForOwner(bool addToWorld)
+void Camera::UpdateVisibilityForOwner()
 {
     MaNGOS::VisibleNotifier notifier(*this);
-    Cell::VisitAllObjects(m_source, notifier, addToWorld ? MAX_VISIBILITY_DISTANCE : m_source->GetVisibilityData().GetVisibilityDistance(), false);
+    Cell::VisitAllObjects(m_source, notifier, MAX_VISIBILITY_DISTANCE, false);
     notifier.Notify();
+}
+
+void Camera::UpdateVisibilityForOwner(UpdateData& data)
+{
+    UpdateVisibilityForOwner();
+    m_owner.WriteViewChanges(data);
 }
 
 //////////////////

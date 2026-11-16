@@ -23,6 +23,10 @@
 #ifndef _AUTHSOCKET_H
 #define _AUTHSOCKET_H
 
+
+
+#define BOOST_BIND_NO_PLACEHOLDERS 1
+
 #include "Common.h"
 #include "Auth/BigNumber.h"
 #include "Auth/CryptoHash.h"
@@ -52,6 +56,8 @@ class AuthSocket : public MaNGOS::AsyncSocket<AuthSocket>
         void SendProof(Sha1Hash sha);
         void LoadRealmlist(ByteBuffer& pkt, uint32 acctid, uint8 accountSecurityLevel = 0);
         bool VerifyPinData(uint32 pin, const sAuthLogonPinData_C& clientData);
+        void RegisterFailedLogin();           // counts a wrong password, PIN or authenticator code towards WrongPass.MaxCount
+        void BuildLogonChallengeSuccess(ByteBuffer& pkt, const char* v_hex, const char* s_hex, uint8 secLevel, const std::string& token);
         int32 generateToken(char const* b32key);
 
         uint8 getEligibleRealmCount(uint8 accountSecurityLevel);
@@ -70,6 +76,7 @@ class AuthSocket : public MaNGOS::AsyncSocket<AuthSocket>
 
     private:
         void verifyVersionAndFinalizeAuthentication(std::shared_ptr<sAuthLogonProof_C> lp);
+        void ArmTimeoutTimer();
 
         enum eStatus
         {

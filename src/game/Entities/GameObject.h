@@ -530,6 +530,15 @@ struct GameObjectInfo
         }
     }
 
+    bool IsUsableInCombat() const
+    {
+        switch (type)
+        {
+            case GAMEOBJECT_TYPE_CHEST: return chest.notInCombat == 0;
+            default: return true;
+        }
+    }
+
     bool IsServerOnly() const
     {
         switch (type)
@@ -540,6 +549,26 @@ struct GameObjectInfo
             case GAMEOBJECT_TYPE_AURA_GENERATOR: return auraGenerator.serverOnly;
             default: return false;
         }
+    }
+
+    bool IsSlowUpdateObject() const
+    {
+        switch (type)
+        {
+            case GAMEOBJECT_TYPE_BINDER:
+            case GAMEOBJECT_TYPE_GENERIC:
+            case GAMEOBJECT_TYPE_MAP_OBJECT:
+            case GAMEOBJECT_TYPE_DUEL_ARBITER:
+            case GAMEOBJECT_TYPE_MAILBOX:
+            case GAMEOBJECT_TYPE_MEETINGSTONE:
+                return true;
+            default: return false;
+        }
+    }
+
+    HighGuid GetHighGuid() const
+    {
+        return type == GAMEOBJECT_TYPE_TRANSPORT ? HIGHGUID_TRANSPORT : HIGHGUID_GAMEOBJECT;
     }
 };
 
@@ -780,6 +809,7 @@ class GameObject : public WorldObject
         uint32 GetLevel() const override { return GetUInt32Value(GAMEOBJECT_LEVEL); }
 
         float GetObjectBoundingRadius() const override;     // overwrite WorldObject version
+        bool CanUseNow(Player const* player) const;
 
         void Use(Unit* user, SpellEntry const* spellInfo = nullptr);
 
@@ -870,7 +900,7 @@ class GameObject : public WorldObject
         float GetStationaryZ() const { if (GetGOInfo()->type != GAMEOBJECT_TYPE_MO_TRANSPORT) return m_stationaryPosition.GetPositionZ(); return 0.f; }
         float GetStationaryO() const { if (GetGOInfo()->type != GAMEOBJECT_TYPE_MO_TRANSPORT) return m_stationaryPosition.GetPositionO(); return GetOrientation(); }
 
-        std::pair<float, float> GetClosestChairSlotPosition(Unit* user) const;
+        std::pair<float, float> GetClosestChairSlotPosition(Unit const* user) const;
 
         SpellCastResult CastSpell(Unit* temporaryCaster, Unit* Victim, uint32 spellId, uint32 triggeredFlags, Item* castItem = nullptr, Aura* triggeredByAura = nullptr, ObjectGuid originalCaster = ObjectGuid(), SpellEntry const* triggeredBy = nullptr);
 
@@ -888,6 +918,10 @@ class GameObject : public WorldObject
         void SetGameObjectGroup(GameObjectGroup* group);
         void ClearGameObjectGroup();
         GameObjectGroup* GetGameObjectGroup() const { return m_goGroup; }
+
+        void UpdateNextUpdateTime() override;
+        uint32 ShouldPerformObjectUpdate(uint32 const diff) override;
+
     protected:
         uint32      m_spellId;
         time_t      m_respawnTime;                          // (secs) time of next respawn (or despawn if GO have owner()),

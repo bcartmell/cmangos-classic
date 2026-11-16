@@ -28,7 +28,7 @@
 #include "Entities/ObjectGuid.h"
 #include "Server/WorldSession.h"
 
-UpdateData::UpdateData() : m_data(1, {ByteBuffer(0), 0}), m_currentIndex(0)
+UpdateData::UpdateData() : m_blocks(0)
 {
 }
 
@@ -42,22 +42,16 @@ void UpdateData::AddOutOfRangeGUID(ObjectGuid const& guid)
     m_outOfRangeGUIDs.insert(guid);
 }
 
-void UpdateData::AddUpdateBlock(const ByteBuffer& block)
+void UpdateData::AddUpdateBlock(const ByteBuffer& block, bool transport)
 {
-    const size_t existing = (128 + (9 * m_outOfRangeGUIDs.size()) + m_data[m_currentIndex].m_buffer.size());
+    m_blocks.append(block);
+    m_blockEnds.push_back(m_blocks.wpos());
+    m_transportBlocks.push_back(transport);
+}
 
-    if ((existing + block.size()) < MAX_NETCLIENT_PACKET_SIZE)
-    {
-        m_data[m_currentIndex].m_buffer.append(block);
-        ++m_data[m_currentIndex].m_blockCount;
-    }
-    else
-    {
-        ++m_currentIndex;
-        m_data.emplace_back();
-        m_data[m_currentIndex].m_buffer.append(block);
-        m_data[m_currentIndex].m_blockCount = 1;
-    }
+void UpdateData::AddAfterCreatePacket(const WorldPacket& data)
+{
+    m_afterCreatePacket.emplace_back(data);
 }
 
 void UpdateData::Compress(void* dst, uint32* dst_size, void* src, int src_size)
@@ -116,17 +110,46 @@ void UpdateData::Compress(void* dst, uint32* dst_size, void* src, int src_size)
     *dst_size = c_stream.total_out;
 }
 
-WorldPacket UpdateData::BuildPacket(size_t index, bool hasTransport)
+// End (one past the last block) of the packet that starts with firstBlock
+size_t UpdateData::GetPacketEnd(size_t firstBlock) const
+{
+    size_t reserved = 128;
+    if (firstBlock == 0)
+        reserved += 9 * m_outOfRangeGUIDs.size();
+
+    size_t const start = firstBlock == 0 ? 0 : m_blockEnds[firstBlock - 1];
+    size_t end = firstBlock;
+    while (end < m_blockEnds.size() && (end == firstBlock || reserved + (m_blockEnds[end] - start) < MAX_NETCLIENT_PACKET_SIZE))
+        ++end;
+    return end;
+}
+
+WorldPacket UpdateData::BuildPacket(size_t index) const
+{
+    size_t firstBlock = 0;
+    for (size_t i = 0; i < index; ++i)
+        firstBlock = GetPacketEnd(firstBlock);
+    return BuildPacketOfBlocks(firstBlock, GetPacketEnd(firstBlock));
+}
+
+WorldPacket UpdateData::BuildPacketOfBlocks(size_t firstBlock, size_t endBlock) const
 {
     WorldPacket packet;
     MANGOS_ASSERT(packet.empty());                         // shouldn't happen
 
-    ByteBuffer buf(4 + 1 + (m_outOfRangeGUIDs.empty() ? 0 : 1 + 4 + 9 * m_outOfRangeGUIDs.size()) + m_data[index].m_buffer.wpos());
+    bool const hasOutOfRange = firstBlock == 0 && !m_outOfRangeGUIDs.empty();
+    size_t const start = firstBlock == 0 ? 0 : m_blockEnds[firstBlock - 1];
+    size_t const stop = endBlock == 0 ? 0 : m_blockEnds[endBlock - 1];
+    bool hasTransport = false;
+    for (size_t i = firstBlock; i < endBlock && !hasTransport; ++i)
+        hasTransport = m_transportBlocks[i];
 
-    buf << (uint32)(!m_outOfRangeGUIDs.empty() ? m_data[index].m_blockCount + 1 : m_data[index].m_blockCount);
-    buf << (uint8)(hasTransport ? 1 : 0);
+    ByteBuffer buf(4 + 1 + (hasOutOfRange ? 1 + 4 + 9 * m_outOfRangeGUIDs.size() : 0) + (stop - start));
 
-    if (!m_outOfRangeGUIDs.empty())
+    buf << uint32(endBlock - firstBlock + (hasOutOfRange ? 1 : 0));
+    buf << uint8(hasTransport);
+
+    if (hasOutOfRange)
     {
         buf << (uint8) UPDATETYPE_OUT_OF_RANGE_OBJECTS;
         buf << (uint32) m_outOfRangeGUIDs.size();
@@ -135,7 +158,8 @@ WorldPacket UpdateData::BuildPacket(size_t index, bool hasTransport)
             buf << m_outOfRangeGUID.WriteAsPacked();
     }
 
-    buf.append(m_data[index].m_buffer);
+    if (stop > start)
+        buf.append(m_blocks.contents() + start, stop - start);
 
     size_t pSize = buf.wpos();                              // use real used data size
 
@@ -163,15 +187,46 @@ WorldPacket UpdateData::BuildPacket(size_t index, bool hasTransport)
 
 void UpdateData::Clear()
 {
-    m_data.clear();
+    // the buffers are kept for the next packets, unless a large update made them grow beyond what the usual ones need
+    size_t const keptBlocksSize = 16 * 1024;
+    size_t const keptBlockCount = 512;
+
     m_outOfRangeGUIDs.clear();
+    if (m_blocks.wpos() > keptBlocksSize)
+        m_blocks = ByteBuffer(0);
+    else
+        m_blocks.clear();
+    if (m_blockEnds.size() > keptBlockCount)
+    {
+        std::vector<size_t>().swap(m_blockEnds);
+        std::vector<bool>().swap(m_transportBlocks);
+    }
+    else
+    {
+        m_blockEnds.clear();
+        m_transportBlocks.clear();
+    }
+    if (m_afterCreatePacket.size() > keptBlockCount)
+        std::vector<WorldPacket>().swap(m_afterCreatePacket);
+    else
+        m_afterCreatePacket.clear();
 }
 
-void UpdateData::SendData(WorldSession& session)
+void UpdateData::SendData(WorldSession& session, bool forceSend/*= false*/) const
 {
-    for (size_t i = 0; i < GetPacketCount(); ++i)
+    if (!HasData())
+        return;
+
+    size_t firstBlock = 0;
+    do
     {
-        WorldPacket packet = BuildPacket(i);
+        size_t const endBlock = GetPacketEnd(firstBlock);
+        WorldPacket packet = BuildPacketOfBlocks(firstBlock, endBlock);
         session.SendPacket(packet);
+        firstBlock = endBlock;
     }
+    while (firstBlock < m_blockEnds.size());
+
+    for (auto& packet : m_afterCreatePacket)
+        session.SendPacket(packet, forceSend);
 }

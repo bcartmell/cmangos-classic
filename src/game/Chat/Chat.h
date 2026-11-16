@@ -152,6 +152,7 @@ class ChatHandler
         char* ExtractKeyFromLink(char** text, char const* linkType, char** something1 = nullptr);
         static char* ExtractKeyFromLink(char** text, char const* const* linkTypes, int* found_idx = nullptr, char** something1 = nullptr);
         bool  ExtractUint32KeyFromLink(char** text, char const* linkType, uint32& value);
+        bool  ExtractUint32KeysFromLink(char** text, char const* linkType1, char const* linkType2, uint32& value1, uint32& value2);
 
         uint32 ExtractAccountId(char** args, std::string* accountName = nullptr, Player** targetIfNullArg = nullptr);
         uint32 ExtractSpellIdFromLink(char** text);
@@ -403,6 +404,7 @@ class ChatHandler
         bool HandleLookupAccountEmailCommand(char* args);
         bool HandleLookupAccountIpCommand(char* args);
         bool HandleLookupAccountNameCommand(char* args);
+        bool HandleLookupAccountAllCommand(char* args);
         bool HandleLookupAreaCommand(char* args);
         bool HandleLookupCreatureCommand(char* args);
         bool HandleLookupEventCommand(char* args);
@@ -751,9 +753,6 @@ class ChatHandler
         bool HandleStableCommand(char* args);
         bool HandleWaterwalkCommand(char* args);
         bool HandleQuitCommand(char* args);
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-        bool HandlePlayerbotCommand(char* args);
-#endif
 
 #ifdef ENABLE_PLAYERBOTS
         bool HandlePlayerbotCommand(char* args);
@@ -854,7 +853,6 @@ class ChatHandler
 
         typedef std::list<DeletedInfo> DeletedInfoList;
         bool GetDeletedCharacterInfoList(DeletedInfoList& foundList, std::string searchString = "");
-        std::string GenerateDeletedCharacterGUIDsWhereStr(DeletedInfoList::const_iterator& itr, DeletedInfoList::const_iterator const& itr_end);
         void HandleCharacterDeletedListHelper(DeletedInfoList const& foundList);
         void HandleCharacterDeletedRestoreHelper(DeletedInfo const& delInfo);
 

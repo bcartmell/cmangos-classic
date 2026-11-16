@@ -40,7 +40,6 @@
 #include "Entities/GossipDef.h"
 #include "Mails/Mail.h"
 #include "Tools/Formulas.h"
-#include "Maps/InstanceData.h"
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
 #include "Grids/CellImpl.h"
@@ -474,8 +473,7 @@ void ObjectMgr::LoadCreatureTemplates()
             const_cast<CreatureInfo*>(cInfo)->MaxLevel = uint32(DEFAULT_MAX_CREATURE_LEVEL);
         }
 
-        // use below code for 0-checks for unit_class
-        if (!cInfo->UnitClass || (((1 << (cInfo->UnitClass - 1)) & CLASSMASK_ALL_CREATURES) == 0))
+        if (!cInfo->UnitClass || ((convertEnumToFlag(cInfo->UnitClass) & CLASSMASK_ALL_CREATURES) == 0))
         {
             sLog.outErrorDb("Creature (Entry: %u) does not have proper `UnitClass(%u)` in creature_template", cInfo->Entry, cInfo->UnitClass);
             const_cast<CreatureInfo*>(cInfo)->UnitClass = uint32(CLASS_WARRIOR);
@@ -722,7 +720,7 @@ void ObjectMgr::LoadCreatureClassLvlStats()
     // initialize data array
     memset(&m_creatureClassLvlStats, 0, sizeof(m_creatureClassLvlStats));
 
-    std::string queryStr = "SELECT Class, Level, BaseMana, BaseMeleeAttackPower, BaseRangedAttackPower, BaseArmor, Strength, Agility, Stamina, Intellect, Spirit, BaseHealthExp0, BaseDamageExp0 "
+    std::string queryStr = "SELECT Class, Level, BaseMana, BaseMeleeAttackPower, BaseRangedAttackPower, BaseArmor, Strength, Agility, Stamina, Intellect, Spirit, BaseHealthExp0, BaseDamageExp0, BaseDamageExp0OLD "
                            "FROM creature_template_classlevelstats ORDER BY Class, Level";
 
     auto queryResult = WorldDatabase.Query(queryStr.c_str());
@@ -753,7 +751,7 @@ void ObjectMgr::LoadCreatureClassLvlStats()
             continue;
         }
 
-        if (((1 << (creatureClass - 1)) & CLASSMASK_ALL_CREATURES) == 0)
+        if ((convertEnumToFlag(creatureClass) & CLASSMASK_ALL_CREATURES) == 0)
         {
             sLog.outErrorDb("Found stats for creature class [%u], incorrect class for this core. Skip!", creatureClass);
             continue;
@@ -772,12 +770,13 @@ void ObjectMgr::LoadCreatureClassLvlStats()
         cCLS.Spirit                 = fields[10].GetUInt32();
         cCLS.BaseHealth             = fields[11].GetUInt32();
         cCLS.BaseDamage             = fields[12].GetFloat();
+        cCLS.BaseDamageOLD          = fields[13].GetFloat();
 
         // should ensure old data does not need change (not wanting to recalculate to avoid losing data)
         // if any mistake is made, it will be in these formulae that make asumptions about the new calculations
         // AP, RAP, HP, Mana and armor should stay the same pre-change and post-change when using multipliers == 1
         cCLS.BaseMana -= std::min(cCLS.BaseMana, std::max(0u, (uint32)Unit::GetManaBonusFromIntellect(cCLS.Intellect)));
-        cCLS.BaseMeleeAttackPower -= std::min(cCLS.BaseMeleeAttackPower, std::max(0.f, float(cCLS.Strength >= 10 ? (cCLS.Strength - 10) * 2 : 0)));
+        // cCLS.BaseMeleeAttackPower -= std::min(cCLS.BaseMeleeAttackPower, std::max(0.f, float(cCLS.Strength >= 10 ? (cCLS.Strength - 10) * 2 : 0)));
         cCLS.BaseRangedAttackPower -= std::min(cCLS.BaseRangedAttackPower, std::max(0.f, float(cCLS.Agility >= 10 ? (cCLS.Agility - 10) : 0)));
         cCLS.BaseArmor -= std::min(cCLS.BaseArmor, std::max(0u, cCLS.Agility * 2));
         ++storedRow;
@@ -1091,6 +1090,20 @@ std::shared_ptr<CreatureSpellListContainer> ObjectMgr::LoadCreatureSpellLists()
             spell.InitialMax = fields[10].GetUInt32();
             spell.RepeatMin = fields[11].GetUInt32();
             spell.RepeatMax = fields[12].GetUInt32();
+
+            if (spell.InitialMin > spell.InitialMax)
+            {
+                sLog.outErrorDb("LoadCreatureSpellLists: Invalid creature_spell_list %u list, spell %u has smaller InitialMax than InitialMin.", spell.Id, spell.SpellId);
+                continue;
+            }
+
+            if (spell.RepeatMin > spell.RepeatMax)
+            {
+                sLog.outErrorDb("LoadCreatureSpellLists: Invalid creature_spell_list %u list, spell %u has smaller RepeatMax than RepeatMin.", spell.Id, spell.SpellId);
+                continue;
+            }
+
+
             spell.DisabledForAI = !spellInfo || spellInfo->HasAttribute(SPELL_ATTR_EX_NO_AUTOCAST_AI);
             newContainer->spellLists[spell.Id].Spells.emplace(spell.Position, spell);
         } while (result->NextRow());
@@ -1164,6 +1177,7 @@ void ObjectMgr::LoadSpawnGroups()
             }
 
             entry.Active = false;
+            entry.Large = false;
             entry.EnabledByDefault = true;
             entry.formationEntry = nullptr;
             entry.HasChancedSpawns = false;
@@ -1487,15 +1501,22 @@ void ObjectMgr::LoadSpawnGroups()
                 auto& creatureDynguidsForMap = m_dynguidCreatureDbGuids[data->mapid];
                 creatureDynguidsForMap.erase(std::remove(creatureDynguidsForMap.begin(), creatureDynguidsForMap.end(), guidData.DbGuid), creatureDynguidsForMap.end());
                 newContainer->spawnGroupByGuidMap.emplace(std::make_pair(guidData.DbGuid, uint32(TYPEID_UNIT)), &entry);
-                if (sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE))
+                bool actives = sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE);
+                bool specials = sWorld.getConfig(CONFIG_BOOL_SPECIALS_ACTIVE);
+                if (actives || specials)
                 {
                     for (auto& data : entry.RandomEntries)
                     {
                         if (CreatureInfo const* cinfo = GetCreatureTemplate(data.Entry))
                         {
-                            if ((cinfo->ExtraFlags & CREATURE_EXTRA_FLAG_ACTIVE) != 0)
+                            if (actives && (cinfo->ExtraFlags & CREATURE_EXTRA_FLAG_ACTIVE) != 0)
                             {
                                 entry.Active = true;
+                                break;
+                            }
+                            else if (specials && cinfo->IsLargeOrBiggerCreature())
+                            {
+                                entry.Large = true;
                                 break;
                             }
                         }
@@ -1515,15 +1536,22 @@ void ObjectMgr::LoadSpawnGroups()
                 auto& goDynguidsForMap = m_dynguidGameobjectDbGuids[data->mapid];
                 goDynguidsForMap.erase(std::remove(goDynguidsForMap.begin(), goDynguidsForMap.end(), guidData.DbGuid), goDynguidsForMap.end());
                 newContainer->spawnGroupByGuidMap.emplace(std::make_pair(guidData.DbGuid, uint32(TYPEID_GAMEOBJECT)), &entry);
-                if (sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE))
+                bool actives = sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE);
+                bool specials = sWorld.getConfig(CONFIG_BOOL_SPECIALS_ACTIVE);
+                if (actives || specials)
                 {
                     for (auto& data : entry.RandomEntries)
                     {
-                        if (CreatureInfo const* cinfo = GetCreatureTemplate(data.Entry))
+                        if (GameObjectInfo const* goInfo = GetGameObjectInfo(data.Entry))
                         {
-                            if ((cinfo->ExtraFlags & CREATURE_EXTRA_FLAG_ACTIVE) != 0)
+                            if (actives && (goInfo->ExtraFlags & GAMEOBJECT_EXTRA_FLAG_ACTIVE) != 0)
                             {
                                 entry.Active = true;
+                                break;
+                            }
+                            else if (specials && goInfo->IsLargeGameObject())
+                            {
+                                entry.Large = true;
                                 break;
                             }
                         }
@@ -1674,7 +1702,7 @@ void ObjectMgr::LoadCreatureModelInfo()
         if (!raceEntry)
             continue;
 
-        if (!((1 << (race - 1)) & RACEMASK_ALL_PLAYABLE))
+        if (!(convertEnumToFlag(race) & RACEMASK_ALL_PLAYABLE))
             continue;
 
         if (CreatureModelInfo const* minfo = GetCreatureModelInfo(raceEntry->model_f))
@@ -2029,6 +2057,8 @@ void ObjectMgr::LoadCreatures()
 
             if (sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE) && cInfo && cInfo->ExtraFlags & CREATURE_EXTRA_FLAG_ACTIVE)
                 m_activeCreatures.emplace(data.mapid, guid);
+            else if (sWorld.getConfig(CONFIG_BOOL_SPECIALS_ACTIVE) && cInfo && cInfo->IsLargeOrBiggerCreature())
+                m_largeCreatures.emplace(data.mapid, guid);
         }
 
         // reset the entry to 0; this will be processed by Creature::GetCreatureConditionalSpawnEntry
@@ -2226,6 +2256,8 @@ void ObjectMgr::LoadGameObjects()
 
             if (sWorld.getConfig(CONFIG_BOOL_AUTOLOAD_ACTIVE) && gInfo && gInfo->ExtraFlags & GAMEOBJECT_EXTRA_FLAG_ACTIVE)
                 m_activeGameObjects.emplace(data.mapid, guid);
+            else if (sWorld.getConfig(CONFIG_BOOL_SPECIALS_ACTIVE) && gInfo && gInfo->IsLargeGameObject())
+                m_largeGameObjects.emplace(data.mapid, guid);
         }
 
         ++count;
@@ -3090,14 +3122,14 @@ void ObjectMgr::LoadPlayerInfo()
             float  orientation   = fields[7].GetFloat();
 
             ChrRacesEntry const* rEntry = sChrRacesStore.LookupEntry(current_race);
-            if (!rEntry || !((1 << (current_race - 1)) & RACEMASK_ALL_PLAYABLE))
+            if (!rEntry || !(convertEnumToFlag(current_race) & RACEMASK_ALL_PLAYABLE))
             {
                 sLog.outErrorDb("Wrong race %u in `playercreateinfo` table, ignoring.", current_race);
                 continue;
             }
 
             ChrClassesEntry const* cEntry = sChrClassesStore.LookupEntry(current_class);
-            if (!cEntry || !((1 << (current_class - 1)) & CLASSMASK_ALL_PLAYABLE))
+            if (!cEntry || !(convertEnumToFlag(current_class) & CLASSMASK_ALL_PLAYABLE))
             {
                 sLog.outErrorDb("Wrong class %u in `playercreateinfo` table, ignoring.", current_class);
                 continue;
@@ -3165,14 +3197,14 @@ void ObjectMgr::LoadPlayerInfo()
                 uint32 current_class = fields[1].GetUInt32();
 
                 ChrRacesEntry const* rEntry = sChrRacesStore.LookupEntry(current_race);
-                if (!rEntry || !((1 << (current_race - 1)) & RACEMASK_ALL_PLAYABLE))
+                if (!rEntry || !(convertEnumToFlag(current_race) & RACEMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong race %u in `playercreateinfo_item` table, ignoring.", current_race);
                     continue;
                 }
 
                 ChrClassesEntry const* cEntry = sChrClassesStore.LookupEntry(current_class);
-                if (!cEntry || !((1 << (current_class - 1)) & CLASSMASK_ALL_PLAYABLE))
+                if (!cEntry || !(convertEnumToFlag(current_class) & CLASSMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong class %u in `playercreateinfo_item` table, ignoring.", current_class);
                     continue;
@@ -3264,12 +3296,12 @@ void ObjectMgr::LoadPlayerInfo()
 
                 for (uint32 raceIndex = RACE_HUMAN; raceIndex < MAX_RACES; ++raceIndex)
                 {
-                    const uint32 raceIndexMask = (1 << (raceIndex - 1));
+                    const uint32 raceIndexMask = convertEnumToFlag(raceIndex);
                     if (!raceMask || (raceMask & raceIndexMask))
                     {
                         for (uint32 classIndex = CLASS_WARRIOR; classIndex < MAX_CLASSES; ++classIndex)
                         {
-                            const uint32 classIndexMask = (1 << (classIndex - 1));
+                            const uint32 classIndexMask = convertEnumToFlag(classIndex);
                             if (!classMask || (classMask & classIndexMask))
                             {
                                 bool obtainable = false;
@@ -3343,14 +3375,14 @@ void ObjectMgr::LoadPlayerInfo()
                 uint32 current_class = fields[1].GetUInt32();
 
                 ChrRacesEntry const* rEntry = sChrRacesStore.LookupEntry(current_race);
-                if (!rEntry || !((1 << (current_race - 1)) & RACEMASK_ALL_PLAYABLE))
+                if (!rEntry || !(convertEnumToFlag(current_race) & RACEMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong race %u in `playercreateinfo_spell` table, ignoring.", current_race);
                     continue;
                 }
 
                 ChrClassesEntry const* cEntry = sChrClassesStore.LookupEntry(current_class);
-                if (!cEntry || !((1 << (current_class - 1)) & CLASSMASK_ALL_PLAYABLE))
+                if (!cEntry || !(convertEnumToFlag(current_class) & CLASSMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong class %u in `playercreateinfo_spell` table, ignoring.", current_class);
                     continue;
@@ -3403,14 +3435,14 @@ void ObjectMgr::LoadPlayerInfo()
                 uint32 current_class = fields[1].GetUInt32();
 
                 ChrRacesEntry const* rEntry = sChrRacesStore.LookupEntry(current_race);
-                if (!rEntry || !((1 << (current_race - 1)) & RACEMASK_ALL_PLAYABLE))
+                if (!rEntry || !(convertEnumToFlag(current_race) & RACEMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong race %u in `playercreateinfo_action` table, ignoring.", current_race);
                     continue;
                 }
 
                 ChrClassesEntry const* cEntry = sChrClassesStore.LookupEntry(current_class);
-                if (!cEntry || !((1 << (current_class - 1)) & CLASSMASK_ALL_PLAYABLE))
+                if (!cEntry || !convertEnumToFlag((current_class) & CLASSMASK_ALL_PLAYABLE))
                 {
                     sLog.outErrorDb("Wrong class %u in `playercreateinfo_action` table, ignoring.", current_class);
                     continue;
@@ -3560,14 +3592,14 @@ void ObjectMgr::LoadPlayerInfo()
             uint32 current_class = fields[1].GetUInt32();
 
             ChrRacesEntry const* rEntry = sChrRacesStore.LookupEntry(current_race);
-            if (!rEntry || !((1 << (current_race - 1)) & RACEMASK_ALL_PLAYABLE))
+            if (!rEntry || !(convertEnumToFlag(current_race) & RACEMASK_ALL_PLAYABLE))
             {
                 sLog.outErrorDb("Wrong race %u in `player_levelstats` table, ignoring.", current_race);
                 continue;
             }
 
             ChrClassesEntry const* cEntry = sChrClassesStore.LookupEntry(current_class);
-            if (!cEntry || !((1 << (current_class - 1)) & CLASSMASK_ALL_PLAYABLE))
+            if (!cEntry || !(convertEnumToFlag(current_class) & CLASSMASK_ALL_PLAYABLE))
             {
                 sLog.outErrorDb("Wrong class %u in `player_levelstats` table, ignoring.", current_class);
                 continue;
@@ -3609,13 +3641,13 @@ void ObjectMgr::LoadPlayerInfo()
     for (int race = 1; race < MAX_RACES; ++race)
     {
         // skip nonexistent races
-        if (!((1 << (race - 1)) & RACEMASK_ALL_PLAYABLE) || !sChrRacesStore.LookupEntry(race))
+        if (!(convertEnumToFlag(race) & RACEMASK_ALL_PLAYABLE) || !sChrRacesStore.LookupEntry(race))
             continue;
 
         for (int class_ = 1; class_ < MAX_CLASSES; ++class_)
         {
             // skip nonexistent classes
-            if (!((1 << (class_ - 1)) & CLASSMASK_ALL_PLAYABLE) || !sChrClassesStore.LookupEntry(class_))
+            if (!(convertEnumToFlag(class_) & CLASSMASK_ALL_PLAYABLE) || !sChrClassesStore.LookupEntry(class_))
                 continue;
 
             PlayerInfo* pInfo = &playerInfo[race][class_];
@@ -4254,7 +4286,7 @@ void ObjectMgr::LoadQuests()
                           //   122                 123                     124                     125
                           "OfferRewardEmoteDelay1, OfferRewardEmoteDelay2, OfferRewardEmoteDelay3, OfferRewardEmoteDelay4,"
                           //   126      127             128                129                   130
-                          "StartScript, CompleteScript, RequiredCondition, BreadcrumbForQuestId, ReputationSpilloverMask"
+                          "StartScript, CompleteScript, RequiredCondition, BreadcrumbForQuestId, RewFactionFlags"
                           " FROM quest_template");
     if (!queryResult)
     {
@@ -6055,7 +6087,7 @@ void ObjectMgr::GenerateZoneAndAreaIds()
     WorldDatabase.DirectExecute("TRUNCATE creature_zone");
     WorldDatabase.DirectExecute("TRUNCATE gameobject_zone");
 
-    std::string baseCreature = "INSERT INTO creature_zone(Guid, ZoneId, AreaId) VALUES";
+    std::string baseCreature = "INSERT INTO creature_zone(Guid, ZoneId, AreaId, WmoGroupId) VALUES";
     int i = 0;
     int total = 0;
     std::string query = "";
@@ -6063,6 +6095,7 @@ void ObjectMgr::GenerateZoneAndAreaIds()
     {
         CreatureData const& creature = data.second;
         uint32 zoneId, areaId;
+        int32 wmoGroupId = 0;
         TerrainInfo* info = sTerrainMgr.LoadTerrain(creature.mapid);
         MMAP::MMapFactory::createOrGetMMapManager()->loadMapInstance(sWorld.GetDataPath(), creature.mapid, 0);
         CellPair p = MaNGOS::ComputeCellPair(creature.posX, creature.posY);
@@ -6071,9 +6104,9 @@ void ObjectMgr::GenerateZoneAndAreaIds()
         int gx = (MAX_NUMBER_OF_GRIDS - 1) - gp.x_coord;
         int gy = (MAX_NUMBER_OF_GRIDS - 1) - gp.y_coord;
         info->LoadMapAndVMap(gx, gy);
-        info->GetZoneAndAreaId(zoneId, areaId, creature.posX, creature.posY, creature.posZ);
+        info->GetZoneAndAreaId(zoneId, areaId, creature.posX, creature.posY, creature.posZ, &wmoGroupId);
 
-        query += "(" + std::to_string(data.first) + "," + std::to_string(zoneId) + "," + std::to_string(areaId) + "),";
+        query += "(" + std::to_string(data.first) + "," + std::to_string(zoneId) + "," + std::to_string(areaId) + "," + std::to_string(wmoGroupId) + "),";
         ++i; ++total;
         if (i >= 100)
         {
@@ -6085,11 +6118,12 @@ void ObjectMgr::GenerateZoneAndAreaIds()
         }
     }
 
-    std::string baseGo = "INSERT INTO gameobject_zone(Guid, ZoneId, AreaId) VALUES";
+    std::string baseGo = "INSERT INTO gameobject_zone(Guid, ZoneId, AreaId, WmoGroupId) VALUES";
     for (auto& data : mGameObjectDataMap)
     {
         GameObjectData const& go = data.second;
         uint32 zoneId, areaId;
+        int32 wmoGroupId = 0;
         TerrainInfo* info = sTerrainMgr.LoadTerrain(go.mapid);
         MMAP::MMapFactory::createOrGetMMapManager()->loadMapInstance(sWorld.GetDataPath(), go.mapid, 0);
         CellPair p = MaNGOS::ComputeCellPair(go.posX, go.posY);
@@ -6098,9 +6132,9 @@ void ObjectMgr::GenerateZoneAndAreaIds()
         int gx = (MAX_NUMBER_OF_GRIDS - 1) - gp.x_coord;
         int gy = (MAX_NUMBER_OF_GRIDS - 1) - gp.y_coord;
         info->LoadMapAndVMap(gx, gy);
-        info->GetZoneAndAreaId(zoneId, areaId, go.posX, go.posY, go.posZ + 1);
+        info->GetZoneAndAreaId(zoneId, areaId, go.posX, go.posY, go.posZ + 1, &wmoGroupId);
 
-        query += "(" + std::to_string(data.first) + "," + std::to_string(zoneId) + "," + std::to_string(areaId) + "),";
+        query += "(" + std::to_string(data.first) + "," + std::to_string(zoneId) + "," + std::to_string(areaId) + "," + std::to_string(wmoGroupId) + "),";
         ++i; ++total;
         if (i >= 100)
         {
@@ -7272,6 +7306,62 @@ void ObjectMgr::LoadPetNumber()
     bar.step();
 
     sLog.outString(">> Loaded the max pet number: %d", m_PetNumbers.GetNextAfterMaxUsed() - 1);
+    sLog.outString();
+}
+
+void ObjectMgr::LoadPetAutocastInfo()
+{
+    std::shared_ptr<PetAutocastSpellMap> newContainer = std::make_shared<PetAutocastSpellMap>();
+    uint32 count = 0;
+    auto queryResult = WorldDatabase.Query("SELECT CreatureEntry,SpellId,CombatCondition,TargetId,Comments FROM pet_autocast_spell_list");
+
+    if (queryResult)
+    {
+        BarGoLink bar(queryResult->GetRowCount());
+
+        do
+        {
+            bar.step();
+
+            Field* fields = queryResult->Fetch();
+            uint32 entry = fields[0].GetUInt32();
+            uint32 spellId = fields[1].GetUInt32();
+
+            SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+            if (!spellInfo)
+            {
+                sLog.outErrorDb("LoadPetAutocastInfo: Invalid pet_autocast_spell_list %u spell %u does not exist. Skipping.", entry, spellId);
+                continue;
+            }
+
+            int32 combatCondition = fields[2].GetInt32();
+            int32 targetId = fields[3].GetInt32();
+
+            auto itr = m_spellListContainer->targeting.find(targetId);
+            if (itr == m_spellListContainer->targeting.end())
+            {
+                sLog.outErrorDb("LoadPetAutocastInfo: Invalid pet_autocast_spell_list %u target %u. Skipping.", entry, targetId);
+                continue;
+            }
+
+            std::string comments = fields[4].GetCppString();
+
+            PetAutocastSpellList autocastListEntry;
+            autocastListEntry.creatureEntry = entry;
+            autocastListEntry.spellId = spellId;
+            autocastListEntry.combatCondition = combatCondition;
+            autocastListEntry.targetId = targetId;
+
+            auto pair = std::make_pair(entry, spellId);
+            (*newContainer).emplace(pair, autocastListEntry);
+
+            ++count;
+        } while (queryResult->NextRow());
+    }
+
+    m_petAutocastContainer = newContainer;
+
+    sLog.outString(">> Loaded %u pet autocast infos", count);
     sLog.outString();
 }
 
@@ -9017,6 +9107,39 @@ void ObjectMgr::LoadVendorTemplates()
         sLog.outErrorDb("Table `npc_vendor_template` has vendor template %u not used by any vendors ", vendor_id);
 }
 
+void ObjectMgr::LoadVendors()
+{
+    LoadVendors("npc_vendor", false);
+
+    for (uint32 i = 1; i < sCreatureStorage.GetMaxEntry(); ++i)
+    {
+        if (CreatureInfo const* cInfo = sCreatureStorage.LookupEntry<CreatureInfo>(i))
+        {
+            if (cInfo->VendorTemplateId)
+            {
+                auto itrVendorTemplate = m_mCacheVendorTemplateItemMap.find(cInfo->VendorTemplateId);
+                if (itrVendorTemplate == m_mCacheVendorTemplateItemMap.end())
+                    continue;
+
+                auto itrVendor = m_mCacheVendorItemMap.find(cInfo->Entry);
+                if (itrVendor == m_mCacheVendorItemMap.end())
+                    continue;
+
+                VendorItemData const& dataTemplate = itrVendorTemplate->second;
+                VendorItemData const& dataVendor = itrVendor->second;
+                for (auto& itemTemplate : dataTemplate.m_items)
+                {
+                    for (auto& itemVendor : dataVendor.m_items)
+                    {
+                        if (itemTemplate->item == itemVendor->item)
+                            sLog.outErrorDb("Creature (Entry: %u) has VendorTemplateId = %u that has same item in both npc_vendor and npc_vendor_template.", cInfo->Entry, cInfo->VendorTemplateId);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* This function is supposed to take care of three things:
  *  1) Load Transports on Map or on Continents
  *  2) Load Active Npcs on Map or Continents
@@ -9053,6 +9176,26 @@ void ObjectMgr::LoadActiveEntities(Map* _map)
     }
 
     // Load Transports on Map _map
+}
+
+void ObjectMgr::LoadLargeEntities(Map* _map)
+{
+    if (sWorld.isForceLoadMap(_map->GetId())) // handled by active
+        return;
+
+    auto bounds = m_largeCreatures.equal_range(_map->GetId());
+    for (auto itr = bounds.first; itr != bounds.second; ++itr)
+    {
+        CreatureData const& data = mCreatureDataMap[itr->second];
+        _map->ForceLoadGrid(data.posX, data.posY);
+    }
+
+    bounds = m_largeGameObjects.equal_range(_map->GetId());
+    for (auto itr = bounds.first; itr != bounds.second; ++itr)
+    {
+        GameObjectData const& data = mGameObjectDataMap[itr->second];
+        _map->ForceLoadGrid(data.posX, data.posY);
+    }
 }
 
 void ObjectMgr::LoadNpcGossips()

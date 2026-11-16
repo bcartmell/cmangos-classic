@@ -40,7 +40,7 @@ enum CorpseFlags
     CORPSE_FLAG_NONE        = 0x00,
     CORPSE_FLAG_BONES       = 0x01,
     CORPSE_FLAG_UNK1        = 0x02,
-    CORPSE_FLAG_UNK2        = 0x04,
+    CORPSE_FLAG_PVP         = 0x04,
     CORPSE_FLAG_HIDE_HELM   = 0x08,
     CORPSE_FLAG_HIDE_CLOAK  = 0x10,
     CORPSE_FLAG_LOOTABLE    = 0x20
@@ -68,7 +68,7 @@ class Corpse : public WorldObject
         void SetOwnerGuid(ObjectGuid guid) override { SetGuidValue(CORPSE_FIELD_OWNER, guid); }
 
         uint8 getRace() const { return GetByteValue(CORPSE_FIELD_BYTES_1, 1); }
-        uint32 getRaceMask() const { return 1 << (getRace() - 1); }
+        uint32 getRaceMask() const { return convertEnumToFlag(getRace()); }
         uint8 getGender() const { return GetByteValue(CORPSE_FIELD_BYTES_1, 2); }
 
         // faction template id

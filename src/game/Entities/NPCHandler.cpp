@@ -438,15 +438,13 @@ void WorldSession::SendSpiritResurrect() const
         // or update at original position
         else
         {
-            _player->GetCamera().UpdateVisibilityForOwner();
-            _player->UpdateObjectVisibility();
+            _player->GetMap()->AddUpdateCreateObject(_player);
         }
     }
     // or update at original position
     else
     {
-        _player->GetCamera().UpdateVisibilityForOwner();
-        _player->UpdateObjectVisibility();
+        _player->GetMap()->AddUpdateCreateObject(_player);
     }
 }
 
@@ -1000,8 +998,8 @@ void WorldSession::HandleRepairItemOpcode(WorldPacket& recv_data)
         return;
     }
 
-    // reputation discount
-    float discountMod = _player->GetReputationPriceDiscount(unit);
+    // reputation and PvP rank discount
+    float discountMod = _player->GetRepairPriceMultiplier(unit);
 
     uint32 TotalCost = 0;
     if (itemGuid)

@@ -161,7 +161,7 @@ void Bag::StoreItem(uint8 slot, Item* pItem)
     }
 }
 
-void Bag::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const
+void Bag::BuildCreateUpdateBlockForPlayer(UpdateData& data, Player* target) const
 {
     Item::BuildCreateUpdateBlockForPlayer(data, target);
 
@@ -192,9 +192,6 @@ Item* Bag::GetItemByEntry(uint32 item) const
 uint32 Bag::GetItemCount(uint32 item, Item* skipItem) const
 {
     uint32 count = 0;
-
-    if (this != skipItem && GetEntry() == item)
-        ++count;
 
     for (uint32 i = 0; i < GetBagSize(); ++i)
         if (m_bagslot[i])

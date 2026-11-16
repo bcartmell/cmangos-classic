@@ -308,6 +308,16 @@ struct PetCreateSpellEntry
     uint32 spellid[4];
 };
 
+struct PetAutocastSpellList
+{
+    uint32 creatureEntry;
+    uint32 spellId;
+    int32 combatCondition;
+    int32 targetId;
+};
+
+typedef std::map<std::pair<uint32, uint32>, PetAutocastSpellList> PetAutocastSpellMap;
+
 struct DungeonEncounter
 {
     DungeonEncounter(DungeonEncounterEntry const* _dbcEntry, EncounterCreditType _creditType, uint32 _creditEntry, uint32 _lastEncounterDungeon)
@@ -727,6 +737,7 @@ class ObjectMgr
         void LoadExplorationBaseXP();
         void LoadPetNames();
         void LoadPetNumber();
+        void LoadPetAutocastInfo();
         void LoadCorpses();
         void LoadFishingBaseSkillLevel();
 
@@ -755,7 +766,7 @@ class ObjectMgr
         void LoadDungeonEncounters();
 
         void LoadVendorTemplates();
-        void LoadVendors() { LoadVendors("npc_vendor", false); }
+        void LoadVendors();
         void LoadTrainerTemplates();
         void LoadTrainers() { LoadTrainers("npc_trainer", false); }
 
@@ -769,6 +780,7 @@ class ObjectMgr
 
         /// @param _map Map* of the map for which to load active entities. If nullptr active entities on continents are loaded
         void LoadActiveEntities(Map* _map);
+        void LoadLargeEntities(Map* _map);
 
         std::string GeneratePetName(uint32 entry);
         uint32 GetBaseXP(uint32 level) const;
@@ -1206,6 +1218,7 @@ class ObjectMgr
 
         CreatureSpellList* GetCreatureSpellList(uint32 Id) const; // only for starttime checks - else use Map
         std::shared_ptr<CreatureSpellListContainer> GetCreatureSpellListContainer() { return m_spellListContainer; }
+        std::shared_ptr<PetAutocastSpellMap> GetPetAutocastContainer() { return m_petAutocastContainer; }
         std::shared_ptr<SpawnGroupEntryContainer> GetSpawnGroupContainer() { return m_spawnGroupContainer; }
 
         bool HasWorldStateName(int32 Id) const;
@@ -1344,6 +1357,8 @@ class ObjectMgr
         MapObjectGuids mMapObjectGuids;
         ActiveObjectGuidsOnMap m_activeCreatures;
         ActiveObjectGuidsOnMap m_activeGameObjects;
+        ActiveObjectGuidsOnMap m_largeCreatures;
+        ActiveObjectGuidsOnMap m_largeGameObjects;
         CreatureSpawnTemplateMap m_creatureSpawnTemplateMap;
         CreatureDataMap mCreatureDataMap;
         CreatureLocaleMap mCreatureLocaleMap;
@@ -1379,6 +1394,7 @@ class ObjectMgr
         CreatureImmunityContainer m_creatureImmunities;
 
         std::shared_ptr<CreatureSpellListContainer> m_spellListContainer;
+        std::shared_ptr<PetAutocastSpellMap> m_petAutocastContainer;
 
         std::shared_ptr<SpawnGroupEntryContainer> m_spawnGroupContainer;
 

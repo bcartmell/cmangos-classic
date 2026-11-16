@@ -196,7 +196,10 @@ bool GameObject::Create(uint32 dbGuid, uint32 guidlow, uint32 name_id, Map* map,
         return false;
     }
 
-    Object::_Create(dbGuid, guidlow, goinfo->id, HIGHGUID_GAMEOBJECT);
+    if (!guidlow)                                           // no free map guid counter, already logged
+        return false;
+
+    Object::_Create(dbGuid, guidlow, goinfo->id, goinfo->GetHighGuid());
 
     m_goInfo = goinfo;
 
@@ -720,7 +723,10 @@ void GameObject::Update(const uint32 diff)
 
             // can be not in world at pool despawn
             if (IsInWorld())
-                UpdateObjectVisibility();
+            {
+                if (!IsUsingNewSpawningSystem()) // schedule out of range
+                    ScheduleOutOfRangeOnClientsIAmAt();
+            }
 
             m_forcedDespawn = false;
 
@@ -918,7 +924,7 @@ bool GameObject::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forc
     }
 
     if (dynguid || newGuid == 0)
-        newGuid = map->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT);
+        newGuid = map->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, entry);
 
     if (!Create(dbGuid, newGuid, entry, map, x, y, z, ang, rotation0, rotation1, rotation2, rotation3, animprogress, GO_STATE_READY))
         return false;
@@ -1079,9 +1085,9 @@ bool GameObject::isVisibleForInState(Player const* u, WorldObject const* viewPoi
     if (!IsInWorld() || !u->IsInWorld())
         return false;
 
-    // Transport always visible at this step implementation
-    if (IsMoTransport() && IsInMap(u))
-        return true;
+    // invisible at client always
+    if (!GetGOInfo()->displayId)
+        return false;
 
     // quick check visibility false cases for non-GM-mode
     if (!u->IsGameMaster())
@@ -1152,6 +1158,9 @@ bool GameObject::isVisibleForInState(Player const* u, WorldObject const* viewPoi
         if (GetEntry() == 187039 && ((u->GetVisibilityData().GetInvisibilityDetectMask() | u->GetVisibilityData().GetInvisibilityMask()) & (1 << 10)) == 0)
             return false;
     }
+
+    if (GetVisibilityData().IsInfiniteVisibility())
+        return true;
 
     // check distance
     return IsWithinDistInMap(viewPoint, GetVisibilityData().GetVisibilityDistance(), false);
@@ -1248,7 +1257,7 @@ GameObject* GameObject::SummonLinkedTrapIfAny() const
         return nullptr;
 
     GameObject* linkedGO = new GameObject;
-    uint32 lowGuid = GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT);
+    uint32 lowGuid = GetMap()->GenerateLocalLowGuid(HIGHGUID_GAMEOBJECT, linkedEntry);
     if (!linkedGO->Create(lowGuid, lowGuid, linkedEntry, GetMap(),
                           GetPositionX(), GetPositionY(), GetPositionZ(), GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, GO_ANIMPROGRESS_DEFAULT, GO_STATE_READY))
     {
@@ -1393,6 +1402,69 @@ void GameObject::SwitchDoorOrButton(bool activate, bool alternative /* = false *
         SetGoState(alternative ? GO_STATE_ACTIVE_ALTERNATIVE : GO_STATE_ACTIVE);
     else                                                    // if open -> close
         SetGoState(GO_STATE_READY);
+}
+
+bool GameObject::CanUseNow(Player const* player) const
+{
+    switch (GetGoType())
+    {
+        case GAMEOBJECT_TYPE_CHAIR:
+        {
+            float x, y;
+            std::tie(x, y) = GetClosestChairSlotPosition(player);
+            if (player->GetDistance(x, y, GetPositionZ(), DIST_CALC_NONE, GetTransport()) > 3.f * 3.f)
+                return false;
+            break;
+        }
+        case GAMEOBJECT_TYPE_SUMMONING_RITUAL:
+        {
+            SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(m_goInfo->summoningRitual.spellId);
+            if (spellInfo && spellInfo->HasAttribute(SPELL_ATTR_NOT_IN_COMBAT_ONLY_PEACEFUL) && player->IsInCombat())
+                return false;
+
+            WorldObject const* owner = GetOwner();
+            if (owner && owner->IsPlayer())
+            {
+                Player const* ownerPlayer = static_cast<Player const*>(owner);
+                if (!player->IsInGroup(ownerPlayer, false))
+                    return false;
+            }
+            break;
+        }
+    }
+
+    if (!GetGOInfo()->GetLockId())
+    {
+        // mounted and cannot unmount
+        if (player->GetMountID() && !GetGOInfo()->IsUsableMounted() && (player->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_TAXI_FLIGHT) || !player->IsClientControlled()))
+            return false;
+
+        // We can't interact with anyone while being shapeshifted, unless form flags allow us to do so
+        if (player->IsShapeShifted())
+        {
+            if (SpellShapeshiftFormEntry const* formEntry = sSpellShapeshiftFormStore.LookupEntry(player->GetShapeshiftForm()))
+            {
+                // meant to have an can unshift check here
+                if (!(formEntry->flags1 & SHAPESHIFT_FLAG_CAN_NPC_INTERACT) && (player->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_TAXI_FLIGHT) || !player->IsClientControlled() || (formEntry->flags1 & SHAPESHIFT_FLAG_DONT_AUTO_UNSHIFT) != 0))
+                    return false;
+            }
+            else
+                return false;
+        }
+    }
+
+    // client checks this but needs recheck
+    if (!GetGOInfo()->IsUsableInCombat() && player->IsInCombat())
+        return false;
+
+    // client checks this but needs recheck
+    if (GetGOInfo()->CannotBeUsedUnderImmunity() && player->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE))
+        return false;
+
+    if (HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED) && !GetSpellForLock(player)) // we should not allow use of a locked GO
+        return false;
+
+    return true;
 }
 
 void GameObject::Use(Unit* user, SpellEntry const* spellInfo)
@@ -2076,38 +2148,6 @@ void GameObject::UpdateModelPosition()
     }
 }
 
-SpellEntry const* GameObject::GetSpellForLock(Player const* player) const
-{
-    if (!player)
-        return nullptr;
-
-    uint32 lockId = GetGOInfo()->GetLockId();
-    if (!lockId)
-        return nullptr;
-
-    LockEntry const* lock = sLockStore.LookupEntry(lockId);
-    if (!lock)
-        return nullptr;
-
-    for (uint8 i = 0; i < MAX_LOCK_CASE; ++i)
-    {
-        if (!lock->Type[i])
-            continue;
-
-        if (lock->Type[i] != LOCK_KEY_SKILL)
-            break;
-
-        for (auto&& playerSpell : player->GetSpellMap())
-            if (SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(playerSpell.first))
-                for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
-                    if (spellInfo->Effect[i] == SPELL_EFFECT_OPEN_LOCK && ((uint32)spellInfo->EffectMiscValue[i]) == lock->Index[i])
-                        if (player->CalculateSpellEffectValue(nullptr, spellInfo, SpellEffectIndex(i), nullptr) >= int32(lock->Skill[i]))
-                            return spellInfo;
-    }
-
-    return nullptr;
-}
-
 Player* GameObject::GetOriginalLootRecipient() const
 {
     return m_lootRecipientGuid ? ObjectAccessor::FindPlayer(m_lootRecipientGuid) : nullptr;
@@ -2505,7 +2545,46 @@ void GameObject::AIM_Initialize()
         iData->OnObjectSpawn(this);
 }
 
-std::pair<float, float> GameObject::GetClosestChairSlotPosition(Unit* user) const
+SpellEntry const* GameObject::GetSpellForLock(Player const* player) const
+{
+    if (!player)
+        return nullptr;
+
+    uint32 lockId = GetGOInfo()->GetLockId();
+    if (!lockId)
+        return nullptr;
+
+    LockEntry const* lock = sLockStore.LookupEntry(lockId);
+    if (!lock)
+        return nullptr;
+
+    for (uint8 i = 0; i < MAX_LOCK_CASE; ++i)
+    {
+        if (!lock->Type[i])
+            continue;
+
+        if (lock->Type[i] != LOCK_KEY_SKILL)
+            break;
+
+        for (auto&& playerSpell : player->GetSpellMap())
+            if (SpellEntry const* spellInfo = sSpellTemplate.LookupEntry<SpellEntry>(playerSpell.first))
+                for (uint32 effIdx = 0; effIdx < MAX_EFFECT_INDEX; ++effIdx)
+                    if (spellInfo->Effect[effIdx] == SPELL_EFFECT_OPEN_LOCK && ((uint32)spellInfo->EffectMiscValue[effIdx]) == lock->Index[i])
+                    {
+                        uint32 minRequiredSkill;
+                        if (lock->Skill[i])
+                            minRequiredSkill = lock->Skill[i];
+                        else
+                            minRequiredSkill = GetLevel() * 5;
+                        if (player->CalculateSpellEffectValue(nullptr, spellInfo, SpellEffectIndex(effIdx), nullptr) >= int32(minRequiredSkill))
+                            return spellInfo;
+                    }
+    }
+
+    return nullptr;
+}
+
+std::pair<float, float> GameObject::GetClosestChairSlotPosition(Unit const* user) const
 {
     float outX, outY;
     // check if the db is sane
@@ -2615,6 +2694,23 @@ void GameObject::ClearGameObjectGroup()
     if (m_goGroup)
         m_goGroup->RemoveObject(this);
     m_goGroup = nullptr;
+}
+
+void GameObject::UpdateNextUpdateTime()
+{
+    // If we already have next update time don't reset it (movement mutation should do it)
+    if (m_nextUpdateTime)
+        return;
+
+    if (!m_events.IsEmpty() || m_AI)
+        SetNextUpdateTime(1);
+    else if (GetGOInfo()->IsSlowUpdateObject())
+        SetNextUpdateTime(urand(500, 1000));
+}
+
+uint32 GameObject::ShouldPerformObjectUpdate(uint32 const diff)
+{
+    return WorldObject::ShouldPerformObjectUpdate(diff);
 }
 
 QuaternionData GameObject::GetWorldRotation() const

@@ -579,10 +579,10 @@ enum EmeraldDragons : uint32
 
 static float emeraldDragonSpawns[4][4] =
 {
-    {-10428.8f, -392.176f, 43.7411f, 0.932375f},
-    {753.619f, -4012.f, 94.043f, 3.193f},
-    {-2872.66f, 1884.25f, 52.7336f, 2.6529f},
-    {3301.05f, -3732.57f, 173.544f, 2.9147f}
+    {-10428.8f, -392.176f, 43.7411f, 0.932375f}, // .tele TwilightGrove
+    {852.873f, -3978.85f, 145.916f, 3.40339f}, // .tele Seradane
+    {-2872.66f, 1884.25f, 52.7336f, 2.6529f}, // .tele DreamBough
+    {3301.05f, -3732.57f, 173.544f, 2.9147f} // .tele BoughShadow
 };
 
 static uint32 pathIds[4] =
@@ -1453,7 +1453,7 @@ bool WorldState::SummonMouth(Map* map, ScourgeInvasionData::InvasionZone& zone, 
         Creature* existingMouth = map->GetCreature(zone.mouthGuid);
 
         if (existingMouth)
-            existingMouth->RemoveFromWorld();
+            existingMouth->AddObjectToRemoveList();
 
         if (Creature* mouth = WorldObject::SummonCreature(TempSpawnSettings(nullptr, NPC_MOUTH_OF_KELTHUZAD, position.x, position.y, position.z, position.o, TEMPSPAWN_DEAD_DESPAWN, 0, true), map))
         {
@@ -1478,7 +1478,7 @@ bool WorldState::SummonPallid(Map* map, ScourgeInvasionData::CityAttack& zone, P
         uint32 pathID = 0;
 
         if (existingPallid)
-            existingPallid->RemoveFromWorld();
+            existingPallid->AddObjectToRemoveList();
 
         if (Creature* pallid = WorldObject::SummonCreature(TempSpawnSettings(nullptr, PickRandomValue(NPC_PALLID_HORROR, NPC_PATCHWORK_TERROR), position.x, position.y, position.z, position.o, TEMPSPAWN_DEAD_DESPAWN, 0, true), map))
         {

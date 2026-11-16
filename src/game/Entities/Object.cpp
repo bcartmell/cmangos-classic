@@ -30,6 +30,7 @@
 #include "Entities/UpdateData.h"
 #include "Entities/UpdateMask.h"
 #include "Entities/Transports.h"
+#include "Maps/TransportMgr.h"
 #include "Util/Util.h"
 #include "Grids/CellImpl.h"
 #include "Grids/GridNotifiers.h"
@@ -130,40 +131,7 @@ void Object::SetObjectScale(float newScale)
     SetFloatValue(OBJECT_FIELD_SCALE_X, newScale);
 }
 
-void Object::SendForcedObjectUpdate()
-{
-    if (!m_inWorld || !m_objectUpdated)
-        return;
-
-    UpdateDataMapType update_players;
-
-    BuildUpdateData(update_players);
-    RemoveFromClientUpdateList();
-
-    // here we allocate a std::vector with a size of 0x10000
-    for (auto& update_player : update_players)
-    {
-        for (size_t i = 0; i < update_player.second.GetPacketCount(); ++i)
-        {
-            WorldPacket packet = update_player.second.BuildPacket(i);
-            update_player.first->GetSession()->SendPacket(packet);
-        }
-    }
-}
-
-void Object::BuildMovementUpdateBlock(UpdateData* data, uint8 flags) const
-{
-    ByteBuffer buf(500);
-
-    buf << uint8(UPDATETYPE_MOVEMENT);
-    buf << GetObjectGuid();
-
-    BuildMovementUpdate(&buf, flags);
-
-    data->AddUpdateBlock(buf);
-}
-
-void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const
+void Object::BuildCreateUpdateBlockForPlayer(UpdateData& data, Player* target) const
 {
     if (!target)
         return;
@@ -205,35 +173,51 @@ void Object::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) c
     buf << GetPackGUID();
     buf << uint8(m_objectTypeId);
 
-    BuildMovementUpdate(&buf, updateFlags);
+    BuildMovementUpdate(&buf, updateFlags, target);
     UpdateMask updateMask;
     updateMask.SetCount(m_valuesCount);
     _SetCreateBits(updateMask, target);
     BuildValuesUpdate(updatetype, &buf, &updateMask, target);
-    data->AddUpdateBlock(buf);
-}
+    data.AddUpdateBlock(buf, GetObjectGuid().IsTransport() || GetObjectGuid().IsMOTransport());
 
-void Object::SendCreateUpdateToPlayer(Player* player) const
-{
-    // send create update to player
-    UpdateData updateData;
-    BuildCreateUpdateBlockForPlayer(&updateData, player);
-
-    for (size_t i = 0; i < updateData.GetPacketCount(); ++i)
+    // the movement block of an elevator is off its position (see GetElevatorCreateOffset): restore the exact one right after
+    if (m_objectTypeId == TYPEID_GAMEOBJECT && static_cast<GameObject const*>(this)->GetGOInfo()->type == GAMEOBJECT_TYPE_TRANSPORT)
     {
-        WorldPacket packet = updateData.BuildPacket(i);
-        player->GetSession()->SendPacket(packet);
+        UpdateMask posMask;
+        posMask.SetCount(m_valuesCount);
+        posMask.SetBit(GAMEOBJECT_POS_X);
+        posMask.SetBit(GAMEOBJECT_POS_Y);
+        posMask.SetBit(GAMEOBJECT_POS_Z);
+        BuildValuesUpdateBlockForPlayer(data, posMask, target);
     }
 }
 
-void Object::BuildValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const
+void Object::ChangedValuesWriter::WriteFor(Player* client)
 {
-    UpdateMask updateMask;
-    updateMask.SetCount(m_valuesCount);
+    if (!m_fieldsListed)
+    {
+        m_fieldsListed = true;
+        for (uint16 index = 0; index < m_object.m_valuesCount; ++index)
+            if (m_object.m_changedValues[index])
+                m_changedFields.push_back(index);
+        if (!m_changedFields.empty())
+            m_visibleFields.SetCount(m_object.m_valuesCount);
+    }
 
-    _SetUpdateBits(updateMask, target);
-    if (updateMask.HasData())
-        BuildValuesUpdateBlockForPlayer(data, updateMask, target);
+    if (m_changedFields.empty())
+        return;
+
+    uint16 const* flags = nullptr;
+    uint16 const visibleFlag = m_object.GetUpdateFieldFlagsForTarget(client, flags);
+    MANGOS_ASSERT(flags);
+
+    m_visibleFields.Clear();
+    for (uint16 index : m_changedFields)
+        if (flags[index] & visibleFlag)
+            m_visibleFields.SetBit(index);
+
+    if (m_visibleFields.HasData())
+        m_object.BuildValuesUpdateBlockForPlayer(client->GetClientUpdate(), m_visibleFields, client);
 }
 
 void Object::BuildValuesUpdateBlockForPlayerWithFlags(UpdateData& data, Player* target, UpdateFieldFlags flags) const
@@ -253,10 +237,11 @@ void Object::BuildValuesUpdateBlockForPlayer(UpdateData& data, UpdateMask& updat
     buf << GetPackGUID();
 
     BuildValuesUpdate(UPDATETYPE_VALUES, &buf, &updateMask, target);
-    data.AddUpdateBlock(buf);
+
+    data.AddUpdateBlock(buf, GetObjectGuid().IsTransport() || GetObjectGuid().IsMOTransport());
 }
 
-void Object::BuildForcedValuesUpdateBlockForPlayer(UpdateData* data, Player* target) const
+void Object::BuildForcedValuesUpdateBlockForPlayer(UpdateData& data, Player* target) const
 {
     ByteBuffer buf(500);
 
@@ -269,12 +254,7 @@ void Object::BuildForcedValuesUpdateBlockForPlayer(UpdateData* data, Player* tar
     _SetCreateBits(updateMask, target);
     BuildValuesUpdate(UPDATETYPE_VALUES, &buf, &updateMask, target);
 
-    data->AddUpdateBlock(buf);
-}
-
-void Object::BuildOutOfRangeUpdateBlock(UpdateData* data) const
-{
-    data->AddOutOfRangeGUID(GetObjectGuid());
+    data.AddUpdateBlock(buf, GetObjectGuid().IsTransport() || GetObjectGuid().IsMOTransport());
 }
 
 void Object::DestroyForPlayer(Player* target) const
@@ -286,7 +266,29 @@ void Object::DestroyForPlayer(Player* target) const
     target->GetSession()->SendPacket(data);
 }
 
-void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
+// The client places the collision of an elevator only at a tick where the elevator is away from the position it got at creation,
+// so a stopped elevator would stay without collision and its passengers would fall through it. Its create block puts it 1 cm off,
+// on an axis its path never uses, and a values block right after gives back the exact position: the first tick places it.
+static void GetElevatorCreateOffset(GameObject const* go, float& dx, float& dz)
+{
+    dx = 0.0f;
+    dz = 0.0f;
+    if (go->GetGOInfo()->type != GAMEOBJECT_TYPE_TRANSPORT)
+        return;
+    TransportAnimation const* anim = sTransportMgr.GetTransportAnimInfo(go->GetGOInfo()->id);
+    if (!anim)
+        return;
+    bool movesZ = false;
+    for (auto const& node : anim->Path)
+        if (node.second->Z != 0.0f)
+            movesZ = true;
+    if (movesZ)
+        dx = 0.01f;
+    else
+        dz = 0.01f;
+}
+
+void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags, Player const* target) const
 {
     Unit const* unit = nullptr;
     uint32 highGuid = 0;
@@ -347,9 +349,11 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
         if (updateFlags & UPDATEFLAG_TRANSPORT)
         {
             GameObject const* go = static_cast<GameObject const*>(this);
-            *data << float(go->GetStationaryX());
+            float dx, dz;
+            GetElevatorCreateOffset(go, dx, dz);
+            *data << float(go->GetStationaryX() + dx);
             *data << float(go->GetStationaryY());
-            *data << float(go->GetStationaryZ());
+            *data << float(go->GetStationaryZ() + dz);
             *data << float(go->GetStationaryO());
         }
         else
@@ -378,11 +382,13 @@ void Object::BuildMovementUpdate(ByteBuffer* data, uint8 updateFlags) const
 
     if (updateFlags & UPDATEFLAG_TRANSPORT)
     {
-        GameObject const* go = static_cast<GameObject const*>(this);
-        if (go && go->IsTransport())
-            *data << uint32(static_cast<GenericTransport const*>(go)->GetPathProgress());
-        else
-            *data << uint32(go->GetMap()->GetCurrentMSTime());
+        // the client takes this time as the transport time at the moment it gets the packet: it is given the time the
+        // packet arrives at this client
+        WorldObject const* wo = static_cast<WorldObject const*>(this);
+        uint32 transportTime = wo->GetMap()->GetCurrentMSTime();
+        if (target)
+            transportTime += target->GetSession()->GetOneWayDelay();
+        *data << uint32(transportTime);
     }
 }
 
@@ -424,7 +430,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
     // 2 specialized loops for speed optimization in non-unit case
     if (isType(TYPEMASK_UNIT))                              // unit (creature/player) case
     {
-        for (uint16 index = 0; index < m_valuesCount; ++index)
+        for (uint32 index = updateMask->GetNextSetBit(0); index < updateMask->GetCount(); index = updateMask->GetNextSetBit(index + 1))
         {
             if (updateMask->GetBit(index))
             {
@@ -643,7 +649,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
     }
     else if (isType(TYPEMASK_CORPSE))                       // corpse case
     {
-        for (uint16 index = 0; index < m_valuesCount; ++index)
+        for (uint32 index = updateMask->GetNextSetBit(0); index < updateMask->GetCount(); index = updateMask->GetNextSetBit(index + 1))
         {
             if (updateMask->GetBit(index))
             {
@@ -676,7 +682,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
     }
     else if (isType(TYPEMASK_GAMEOBJECT))                   // gameobject case
     {
-        for (uint16 index = 0; index < m_valuesCount; ++index)
+        for (uint32 index = updateMask->GetNextSetBit(0); index < updateMask->GetCount(); index = updateMask->GetNextSetBit(index + 1))
         {
             if (updateMask->GetBit(index))
             {
@@ -717,7 +723,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
     }
     else                                                    // other objects case (no special index checks)
     {
-        for (uint16 index = 0; index < m_valuesCount; ++index)
+        for (uint32 index = updateMask->GetNextSetBit(0); index < updateMask->GetCount(); index = updateMask->GetNextSetBit(index + 1))
         {
             if (updateMask->GetBit(index))
             {
@@ -731,10 +737,7 @@ void Object::BuildValuesUpdate(uint8 updatetype, ByteBuffer* data, UpdateMask* u
 void Object::ClearUpdateMask(bool remove)
 {
     if (m_uint32Values)
-    {
-        for (uint16 index = 0; index < m_valuesCount; ++index)
-            m_changedValues[index] = false;
-    }
+        std::fill(m_changedValues.begin(), m_changedValues.end(), false);
 
     if (m_objectUpdated)
     {
@@ -820,17 +823,6 @@ void Object::MarkUpdateFieldsWithFlagForUpdate(UpdateMask& updateMask, uint16 fl
         if (GetUInt32Value(index) != 0 && (flags[index] & flag))
             updateMask.SetBit(index);
     }
-}
-
-void Object::_SetUpdateBits(UpdateMask& updateMask, Player* target) const
-{
-    uint16 const* flags = nullptr;
-    uint16 visibleFlag = GetUpdateFieldFlagsForTarget(target, flags);
-    MANGOS_ASSERT(flags);
-
-    for (uint16 index = 0; index < m_valuesCount; ++index)
-        if (m_changedValues[index] && (flags[index] & visibleFlag))
-            updateMask.SetBit(index);
 }
 
 void Object::_SetCreateBits(UpdateMask& updateMask, Player* target) const
@@ -1084,20 +1076,6 @@ bool Object::PrintEntryError(char const* descr) const
 }
 
 
-void Object::BuildUpdateDataForPlayer(Player* pl, UpdateDataMapType& update_players) const
-{
-    UpdateDataMapType::iterator iter = update_players.find(pl);
-
-    if (iter == update_players.end())
-    {
-        std::pair<UpdateDataMapType::iterator, bool> p = update_players.insert(UpdateDataMapType::value_type(pl, UpdateData()));
-        MANGOS_ASSERT(p.second);
-        iter = p.first;
-    }
-
-    BuildValuesUpdateBlockForPlayer(iter->second, iter->first);
-}
-
 void Object::AddToClientUpdateList()
 {
     sLog.outError("Unexpected call of Object::AddToClientUpdateList for object (TypeId: %u Update fields: %u)", GetTypeId(), m_valuesCount);
@@ -1107,12 +1085,6 @@ void Object::AddToClientUpdateList()
 void Object::RemoveFromClientUpdateList()
 {
     sLog.outError("Unexpected call of Object::RemoveFromClientUpdateList for object (TypeId: %u Update fields: %u)", GetTypeId(), m_valuesCount);
-    MANGOS_ASSERT(false);
-}
-
-void Object::BuildUpdateData(UpdateDataMapType& /*update_players */)
-{
-    sLog.outError("Unexpected call of Object::BuildUpdateData for object (TypeId: %u Update fields: %u)", GetTypeId(), m_valuesCount);
     MANGOS_ASSERT(false);
 }
 
@@ -1135,6 +1107,18 @@ void Object::ForceValuesUpdateAtIndex(uint16 index)
     {
         AddToClientUpdateList();
         m_objectUpdated = true;
+    }
+}
+
+void Object::ForceValuesUpdateForFlag(uint16 flag)
+{
+    uint16 const* flags = UpdateFields::GetUpdateFieldFlagsArray(GetTypeId());
+    MANGOS_ASSERT(flags);
+
+    for (uint16 index = 0; index < m_valuesCount; ++index)
+    {
+        if (GetUInt32Value(index) != 0 && (flags[index] & flag))
+            ForceValuesUpdateAtIndex(index);
     }
 }
 
@@ -1179,8 +1163,8 @@ bool WorldObject::HasStringId(uint32 stringId) const
 }
 
 WorldObject::WorldObject() :
-    m_transport(nullptr), m_isOnEventNotified(false),
-    m_visibilityData(this), m_currMap(nullptr),
+    m_inRemoveList(false), m_transport(nullptr), m_isOnEventNotified(false),
+    m_visibilityData(this), m_nextUpdateTime(0), m_accumulatedUpdateDiff(0), m_currMap(nullptr),
     m_mapId(0), m_InstanceId(0),
     m_isActiveObject(false), m_debugFlags(0), m_castCounter(0)
 {
@@ -1190,6 +1174,11 @@ void WorldObject::CleanupsBeforeDelete()
 {
     m_events.KillAllEvents(false);                      // non-delatable (currently casted spells) will not deleted now but it will deleted at call in Map::RemoveAllObjectsInRemoveList
     RemoveFromWorld();
+}
+
+WorldObject::~WorldObject()
+{
+    MANGOS_ASSERT(!m_inRemoveList);
 }
 
 void WorldObject::Update(const uint32 diff)
@@ -1674,7 +1663,7 @@ void WorldObject::MovePositionToFirstCollision(Position& pos, float dist, float 
         }
         UpdateAllowedPositionZ(dest.x, dest.y, dest.z);
         path.calculate(src, dest, false, true);
-        if ((path.getPathType() & PATHFIND_NOPATH) == 0)
+        if ((path.getPathType() & PATHFIND_NOPATH) == 0 && !path.getPath().empty())
         {
             G3D::Vector3 result = path.getPath().back();
             destX = result.x;
@@ -1768,7 +1757,14 @@ void WorldObject::MonsterSay(char const* text, uint32 language, Unit const* targ
     WorldPacket data;
     ChatHandler::BuildChatPacket(data, CHAT_MSG_MONSTER_SAY, text, Language(language), CHAT_TAG_NONE, GetObjectGuid(), GetName(),
                                  target ? target->GetObjectGuid() : ObjectGuid(), target ? target->GetName() : "");
-    SendMessageToSetInRange(data, sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_SAY), true);
+    float sayRange = sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_SAY);
+    float visibilityDistance = GetVisibilityData().GetVisibilityDistance();
+    if (visibilityDistance >= 400.f) // gigantic aoi and above quadruple say range
+        sayRange *= 4;
+    else if (visibilityDistance >= 200.f) // large aoi and above double say range
+        sayRange *= 2;
+
+    SendMessageToSetInRange(data, sayRange, true);
 }
 
 void WorldObject::MonsterYell(const char* text, uint32 /*language*/, Unit const* target) const
@@ -1841,8 +1837,16 @@ void WorldObject::MonsterText(std::vector<std::string> content, uint32 type, Lan
     switch (type)
     {
         case CHAT_TYPE_SAY:
-            _DoLocalizedTextAround(this, content, CHAT_MSG_MONSTER_SAY, lang, target, sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_SAY));
+        {
+            float sayRange = sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_SAY);
+            float visibilityDistance = GetVisibilityData().GetVisibilityDistance();
+            if (visibilityDistance >= 400.f) // gigantic aoi and above quadruple say range
+                sayRange *= 4;
+            else if (visibilityDistance >= 200.f) // large aoi and above double say range
+                sayRange *= 2;
+            _DoLocalizedTextAround(this, content, CHAT_MSG_MONSTER_SAY, lang, target, sayRange);
             break;
+        }
         case CHAT_TYPE_YELL:
             _DoLocalizedTextAround(this, content, CHAT_MSG_MONSTER_YELL, lang, target, sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_YELL));
             break;
@@ -2049,7 +2053,7 @@ Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
         float dist = settings.forcedOnTop ? 0.0f : CONTACT_DISTANCE;
         pos = CreatureCreatePos(settings.spawner, settings.spawner->GetOrientation(), dist, settings.ori);
     }
-    uint32 lowGuid = map->GenerateLocalLowGuid(cinfo->GetHighGuid());
+    uint32 lowGuid = map->GenerateLocalLowGuid(cinfo->GetHighGuid(), cinfo->Entry);
     if (!creature->Create(lowGuid, lowGuid, pos, cinfo))
     {
         delete creature;
@@ -2118,7 +2122,7 @@ Creature* WorldObject::SummonCreature(TempSpawnSettings settings, Map* map)
             {
                 creature->SetHover(true);
                 //make hover stuff dont fall @killerwife probably dont need all those flags
-                //creature->m_movementInfo.AddMovementFlag(MovementFlags(MOVEFLAG_FLYING | MOVEFLAG_SWIMMING | MOVEFLAG_CAN_FLY | MOVEFLAG_ROOT));
+                //creature->m_movementInfo.AddMovementFlag(MovementFlags(MOVEFLAG_LEVITATING | MOVEFLAG_SWIMMING | MOVEFLAG_CAN_FLY | MOVEFLAG_ROOT));
             }
             if (templateData->IsGravityDisabled())
                 creature->SetLevitate(true);
@@ -2467,17 +2471,7 @@ void WorldObject::HandlePlayPacketSettings(WorldPacket& msg, PlayPacketParameter
 
 void WorldObject::UpdateVisibilityAndView()
 {
-    GetViewPoint().Call_UpdateVisibilityForOwner();
-    UpdateObjectVisibility();
-    GetViewPoint().Event_ViewPointVisibilityChanged();
-}
-
-void WorldObject::UpdateObjectVisibility()
-{
-    CellPair p = MaNGOS::ComputeCellPair(GetPositionX(), GetPositionY());
-    Cell cell(p);
-
-    GetMap()->UpdateObjectVisibility(this, cell, p);
+    GetMap()->AddUpdateCreateObject(this);
 }
 
 void WorldObject::AddToClientUpdateList()
@@ -2490,23 +2484,11 @@ void WorldObject::RemoveFromClientUpdateList()
     GetMap()->RemoveUpdateObject(this);
 }
 
-struct WorldObjectChangeAccumulator
+// Clients around an object that start seeing it
+struct WorldObjectCreateAccumulator
 {
-    UpdateDataMapType& i_updateDatas;
     WorldObject& i_object;
-    WorldObjectChangeAccumulator(WorldObject& obj, UpdateDataMapType& d) : i_updateDatas(d), i_object(obj)
-    {
-        // send self fields changes in another way, otherwise
-        // with new camera system when player's camera too far from player, camera wouldn't receive packets and changes from player
-        if (i_object.IsPlayer())
-        {
-            Player* plr = static_cast<Player*>(&i_object);
-#ifdef ENABLE_PLAYERBOTS
-            if (plr->isRealPlayer())
-#endif
-            i_object.BuildUpdateDataForPlayer(plr, i_updateDatas);
-        }
-    }
+    explicit WorldObjectCreateAccumulator(WorldObject& obj) : i_object(obj) {}
 
     void Visit(CameraMapType& m)
     {
@@ -2514,26 +2496,89 @@ struct WorldObjectChangeAccumulator
         {
             Player* owner = iter.getSource()->GetOwner();
 #ifdef ENABLE_PLAYERBOTS
-            if (owner->isRealPlayer())
-            {
+            if (!owner->isRealPlayer())
+                continue;
 #endif
-            if (owner != &i_object && owner->HasAtClient(&i_object))
-                i_object.BuildUpdateDataForPlayer(owner, i_updateDatas);
-#ifdef ENABLE_PLAYERBOTS
-            }
-#endif
+            if (owner != &i_object && !owner->HasAtClient(&i_object) && i_object.isVisibleForInState(owner, owner->GetCamera().GetBody(), false))
+                owner->ScheduleCreate(&i_object);
         }
     }
 
     template<class SKIP> void Visit(GridRefManager<SKIP>&) {}
 };
 
-void WorldObject::BuildUpdateData(UpdateDataMapType& update_players)
+void WorldObject::BuildUpdateData()
 {
-    WorldObjectChangeAccumulator notifier(*this, update_players);
-    Cell::VisitWorldObjects(this, notifier, GetVisibilityData().GetVisibilityDistance());
+    if (ItsNewObject())
+        GetMap()->AddCameraToWorld(this);
+
+    ChangedValuesWriter values(*this);
+
+    if (IsPlayer())
+        values.WriteFor(static_cast<Player*>(this));
+
+    for (ObjectGuid const& guid : m_clientGUIDsIAmAt)
+        if (Player* client = GetMap()->GetPlayer(guid))
+            if (client != this && !client->IsCreationPending(this)) // a creation not written yet carries all the values
+                values.WriteFor(client);
 
     ClearUpdateMask(false);
+
+    if (ItsNewObject())
+        SetItsNewObject(false);
+}
+
+void WorldObject::SendForcedObjectUpdate()
+{
+    if (!IsInWorld() || !m_objectUpdated)
+        return;
+
+    BuildUpdateData();
+    RemoveFromClientUpdateList();
+
+    if (IsPlayer())
+        static_cast<Player*>(this)->SendClientUpdate();
+
+    for (ObjectGuid const& guid : m_clientGUIDsIAmAt)
+        if (Player* client = GetMap()->GetPlayer(guid))
+            client->SendClientUpdate();
+}
+
+void WorldObject::UpdateVisibility()
+{
+    if (ItsNewObject())
+        GetMap()->AddCameraToWorld(this);
+
+    // what the players looking through this object see
+    GetViewPoint().Call_UpdateVisibilityForOwner();
+
+    // the clients that stop seeing this object, then the ones that start
+    for (auto itr = m_clientGUIDsIAmAt.begin(); itr != m_clientGUIDsIAmAt.end();)
+    {
+        Player* client = GetMap()->GetPlayer(*itr);
+        ++itr;                                              // ScheduleOutOfRange takes the client off the list
+        if (client && !isVisibleForInState(client, client->GetCamera().GetBody(), true))
+            client->ScheduleOutOfRange(this);
+    }
+
+    WorldObjectCreateAccumulator notifier(*this);
+    Cell::VisitWorldObjects(this, notifier, GetVisibilityData().GetVisibilityDistance());
+}
+
+uint32 WorldObject::GetCarrierDepth() const
+{
+    uint32 const maxDepth = 8;                              // carriers never loop, the bound only protects the server
+    uint32 depth = 0;
+    WorldObject const* passenger = this;
+    while (depth < maxDepth)
+    {
+        WorldObject const* carrier = passenger->GetTransport();
+        if (!carrier)
+            break;
+        passenger = carrier;
+        ++depth;
+    }
+    return depth;
 }
 
 bool WorldObject::IsControlledByPlayer() const
@@ -2696,7 +2741,7 @@ bool WorldObject::GetExpireTime(SpellEntry const& spellEntry, TimePoint& expireT
     return false;
 }
 
-bool WorldObject::IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto /*= nullptr*/) const
+bool WorldObject::IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const* itemProto /*= nullptr*/, bool itemCategoryOnly /*= false*/) const
 {
     uint32 spellCategory = spellEntry.Category;
 
@@ -2706,14 +2751,19 @@ bool WorldObject::IsSpellReady(SpellEntry const& spellEntry, ItemPrototype const
     else
         now = World::GetCurrentClockTime();
 
+    if (!m_cooldownMap.IsGlobalCooldownExpired(now))
+        return false;
+
     // overwrite category by provided category in item prototype during item cast if need
+    // item category 0 keeps the spell category, unless only the item category is checked
     if (itemProto)
     {
         for (const auto& Spell : itemProto->Spells)
         {
             if (Spell.SpellId == spellEntry.Id)
             {
-                spellCategory = Spell.SpellCategory;
+                if (Spell.SpellCategory || itemCategoryOnly)
+                    spellCategory = Spell.SpellCategory;
                 break;
             }
         }
@@ -3018,6 +3068,21 @@ int32 WorldObject::CalculateSpellEffectValue(Unit const* target, SpellEntry cons
     return value;
 }
 
+uint32 WorldObject::ShouldPerformObjectUpdate(uint32 const diff)
+{
+    // For objects that don't have next update time return diff immediately
+    if (!m_nextUpdateTime)
+        return diff;
+
+    m_accumulatedUpdateDiff += diff;
+
+    // Once accumulated time reaches and goes over update time lets use it
+    if (m_accumulatedUpdateDiff >= GetNextUpdateTime())
+        return m_accumulatedUpdateDiff;
+
+    return 0;
+}
+
 float Position::GetAngle(const float x, const float y) const
 {
     float dx = x - GetPositionX();
@@ -3082,6 +3147,27 @@ void WorldObject::RemoveClientIAmAt(Player const* player)
     m_clientGUIDsIAmAt.erase(player->GetObjectGuid());
 }
 
+void WorldObject::DestroyOnClientsIAmAt()
+{
+    if (IsInWorld())
+    {
+        GuidSet clients;
+        std::swap(clients, m_clientGUIDsIAmAt);             // DestroyAtClient takes each client off the list
+        for (ObjectGuid const& guid : clients)
+            if (Player* player = GetMap()->GetPlayer(guid))
+                player->DestroyAtClient(this);
+    }
+}
+
+void WorldObject::ScheduleOutOfRangeOnClientsIAmAt()
+{
+    GuidSet clients;
+    std::swap(clients, m_clientGUIDsIAmAt);                 // ScheduleOutOfRange takes each client off the list
+    for (ObjectGuid const& guid : clients)
+        if (Player* client = GetMap()->GetPlayer(guid))
+            client->ScheduleOutOfRange(this);
+}
+
 bool WorldObject::CheckAndIncreaseCastCounter()
 {
     uint32 maxCasts = sWorld.getConfig(CONFIG_UINT32_MAX_SPELL_CASTS_IN_CHAIN);
@@ -3091,4 +3177,42 @@ bool WorldObject::CheckAndIncreaseCastCounter()
 
     ++m_castCounter;
     return true;
+}
+
+bool CooldownContainer::AddCooldown(TimePoint clockNow, uint32 spellId, uint32 duration, uint32 spellCategory, uint32 categoryDuration, uint32 itemId, bool onHold)
+{
+    RemoveBySpellId(spellId);
+    auto resultItr = m_spellIdMap.emplace(spellId, std::make_unique<CooldownData>(clockNow, spellId, duration, spellCategory, categoryDuration, itemId, onHold));
+    // do not overwrite one permanent category cooldown with another permanent category cooldown
+    if (resultItr.second && spellCategory && categoryDuration)
+    {
+        SpellCategoryEntry const* spellCategoryEntry = sSpellCategory.LookupEntry(spellCategory);
+        if (spellCategoryEntry->flags & uint32(SpellCategoryFlags::CooldownIsGlobal))
+        {
+            m_globalCooldown = std::chrono::milliseconds(categoryDuration) + clockNow;
+            return resultItr.second;
+        }
+
+        auto catItr = FindByCategory(spellCategory);
+        if (!onHold || catItr == m_spellIdMap.end() || !catItr->second->IsPermanent())
+        {
+            // we must keep original category cd owner for sake of client sync
+            if (catItr != m_spellIdMap.end())
+            {
+                catItr->second->SetCatCDExpireTime(std::chrono::milliseconds(categoryDuration) + clockNow);
+                catItr->second->m_typePermanent = false;
+                resultItr.first->second->m_category = 0;
+            }
+            else
+                m_categoryMap.emplace(spellCategory, resultItr.first);
+        }
+        else
+            resultItr.first->second->m_category = 0;
+    }
+
+    return resultItr.second;
+}
+bool CooldownContainer::IsGlobalCooldownExpired(TimePoint& now) const
+{
+    return m_globalCooldown <= now;
 }

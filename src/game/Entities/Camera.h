@@ -47,19 +47,18 @@ class Camera
         // set view to camera's owner
         void ResetView(bool update_far_sight_field = true);
 
-        template<class T>
-        void UpdateVisibilityOf(T* target, UpdateData& data, WorldObjectSet& vis);
         void UpdateVisibilityOf(WorldObject* target) const;
 
         void ReceivePacket(WorldPacket& data);
 
-        // updates visibility of worldobjects around viewpoint for camera's owner
-        void UpdateVisibilityForOwner() { UpdateVisibilityForOwner(false); }
-        void UpdateVisibilityForOwner(bool addToWorld);
+        // decides which worldobjects around the viewpoint enter and leave the view of the camera's owner
+        void UpdateVisibilityForOwner();
+        // same, and writes the changes of the owner's view into data at once
+        void UpdateVisibilityForOwner(UpdateData& data);
 
     private:
         // called when viewpoint changes visibility state
-        void Event_AddedToWorld();
+        void Event_AddedToWorld(UpdateData* data);
         void Event_RemovedFromWorld();
         void Event_Moved();
         void Event_ViewPointVisibilityChanged();
@@ -89,14 +88,15 @@ class ViewPoint
         void Attach(Camera* c) { m_cameras.push_back(c); }
         void Detach(Camera* c) { m_cameras.remove(c); }
 
-        void CameraCall(void (Camera::*handler)())
+        template <typename F>
+        void CameraCall(F handler)
         {
             if (!m_cameras.empty())
             {
                 for (CameraList::iterator itr = m_cameras.begin(); itr != m_cameras.end();)
                 {
                     Camera* c = *(itr++);
-                    (c->*handler)();
+                    handler(c);
                 }
             }
         }
@@ -109,32 +109,32 @@ class ViewPoint
         bool hasViewers() const { return !m_cameras.empty(); }
 
         // these events are called when viewpoint changes visibility state
-        void Event_AddedToWorld(GridType* grid)
+        void Event_AddedToWorld(GridType* grid, UpdateData* data)
         {
             m_grid = grid;
-            CameraCall(&Camera::Event_AddedToWorld);
+            CameraCall([&](Camera* c) { c->Event_AddedToWorld(data); });
         }
 
         void Event_RemovedFromWorld()
         {
             m_grid = nullptr;
-            CameraCall(&Camera::Event_RemovedFromWorld);
+            CameraCall([&](Camera* c) { c->Event_RemovedFromWorld(); });
         }
 
         void Event_GridChanged(GridType* grid)
         {
             m_grid = grid;
-            CameraCall(&Camera::Event_Moved);
+            CameraCall([&](Camera* c) { c->Event_Moved(); });
         }
 
         void Event_ViewPointVisibilityChanged()
         {
-            CameraCall(&Camera::Event_ViewPointVisibilityChanged);
+            CameraCall([&](Camera* c) { c->Event_ViewPointVisibilityChanged(); });
         }
 
         void Call_UpdateVisibilityForOwner()
         {
-            CameraCall(&Camera::UpdateVisibilityForOwner);
+            CameraCall([&](Camera* c) { c->UpdateVisibilityForOwner(); });
         }
 };
 

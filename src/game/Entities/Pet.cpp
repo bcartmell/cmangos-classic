@@ -54,7 +54,7 @@ Pet::Pet(PetType type) :
     m_removed(false), m_happinessTimer(7500), m_loyaltyTimer(12000), m_petType(type), m_duration(0),
     m_loyaltyPoints(0), m_bonusdamage(0), m_loading(false),
     m_xpRequiredForNextLoyaltyLevel(0),
-    m_petModeFlags(PET_MODE_DEFAULT), m_originalCharminfo(nullptr)
+    m_petModeFlags(PET_MODE_DEFAULT), m_originalCharminfo(nullptr), m_scaleWithCls(false)
 {
     m_name = "Pet";
 
@@ -80,7 +80,12 @@ void Pet::RemoveFromWorld()
 {
     ///- Remove the pet from the accessor
     if (IsInWorld())
+    {
+        if (!m_removed && !IsPlayerControlled())
+            Unsummon(PET_SAVE_NOT_IN_SLOT, nullptr, false);
+
         GetMap()->GetObjectsStore().erase<Pet>(GetObjectGuid(), (Pet*)nullptr);
+    }
 
     ///- Don't call the function for Creature, normal mobs + totems go in a different storage
     Unit::RemoveFromWorld();
@@ -241,7 +246,7 @@ bool Pet::LoadPetFromDB(Player* owner, Position const& spawnPos, uint32 petentry
 
     CreatureCreatePos pos(owner->GetMap(), spawnPos.x, spawnPos.y, spawnPos.z, spawnPos.o);
 
-    uint32 guid = pos.GetMap()->GenerateLocalLowGuid(HIGHGUID_PET);
+    uint32 guid = pos.GetMap()->GenerateLocalLowGuid(HIGHGUID_PET, pet_number);
     if (!Create(guid, pos, creatureInfo, pet_number))
     {
         return false;
@@ -989,9 +994,11 @@ int32 Pet::GetDispTP() const
         return -(m_TrainingPoints + 1);
 }
 
-void Pet::Unsummon(PetSaveMode mode, Unit* owner /*= nullptr*/)
+void Pet::Unsummon(PetSaveMode mode, Unit* owner /*= nullptr*/, bool removeList /*= true*/)
 {
     MANGOS_ASSERT(!m_removed);
+
+    m_removed = true;
 
     if (!owner)
         owner = GetOwner();
@@ -1080,8 +1087,8 @@ void Pet::Unsummon(PetSaveMode mode, Unit* owner /*= nullptr*/)
             SavePetToDB(mode, p_owner);
     }
 
-    AddObjectToRemoveList();
-    m_removed = true;
+    if (removeList)
+        AddObjectToRemoveList();
 }
 
 void Pet::GivePetXP(uint32 xp)
@@ -1150,10 +1157,9 @@ bool Pet::CreateBaseAtCreature(Creature* creature)
 
     CreatureCreatePos pos(creature, creature->GetOrientation());
 
-    uint32 guid = creature->GetMap()->GenerateLocalLowGuid(HIGHGUID_PET);
-
     BASIC_LOG("Create pet");
     uint32 pet_number = sObjectMgr.GeneratePetNumber();
+    uint32 guid = creature->GetMap()->GenerateLocalLowGuid(HIGHGUID_PET, pet_number);
     if (!Create(guid, pos, creature->GetCreatureInfo(), pet_number))
         return false;
 
@@ -1351,6 +1357,7 @@ void Pet::InitStatsForLevel(uint32 petlevel)
         }
         case GUARDIAN_PET:
         {
+            m_scaleWithCls = true;
             SelectLevel(petlevel);  // guardians reuse CLS function SelectLevel, so we stop here
             return;
         }
@@ -1434,8 +1441,8 @@ bool Pet::HaveInDiet(ItemPrototype const* item) const
     if (!cFamily)
         return false;
 
-    uint32 diet = cFamily->petFoodMask;
-    uint32 FoodMask = 1 << (item->FoodType - 1);
+    const uint32 diet = cFamily->petFoodMask;
+    const uint32 FoodMask = convertEnumToFlag(item->FoodType);
     return (diet & FoodMask) != 0;
 }
 
@@ -2107,6 +2114,9 @@ void Pet::ToggleAutocast(uint32 spellid, bool apply)
 bool Pet::Create(uint32 guidlow, CreatureCreatePos& cPos, CreatureInfo const* cinfo, uint32 pet_number)
 {
     SetMap(cPos.GetMap());
+
+    if (!guidlow)                                           // no free map guid counter, already logged
+        return false;
 
     Object::_Create(guidlow, guidlow, pet_number, HIGHGUID_PET);
 

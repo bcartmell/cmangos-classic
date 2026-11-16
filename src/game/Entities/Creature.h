@@ -177,6 +177,8 @@ struct CreatureInfo
     uint32  Civilian;
     char const* AIName;
     uint32  ScriptID;
+    float DamageMultiplierOLD;
+    float DamageVarianceOLD;
 
     // helpers
     static HighGuid GetHighGuid()
@@ -338,6 +340,7 @@ struct CreatureClassLvlStats
     uint32  BaseHealth;
     uint32  BaseMana;
     float   BaseDamage;
+    float   BaseDamageOLD;
     float   BaseMeleeAttackPower;
     float   BaseRangedAttackPower;
     uint32  BaseArmor;
@@ -590,7 +593,7 @@ class Creature : public Unit
     public:
 
         explicit Creature(CreatureSubtype subtype = CREATURE_SUBTYPE_GENERIC);
-        virtual ~Creature();
+        virtual ~Creature() override;
 
         void AddToWorld() override;
         void RemoveFromWorld() override;
@@ -620,11 +623,6 @@ class Creature : public Unit
         bool IsTemporarySummon() const { return m_subtype == CREATURE_SUBTYPE_TEMPORARY_SUMMON; }
         bool IsCritter() const { return m_creatureInfo->CreatureType == CREATURE_TYPE_CRITTER; }
 
-#ifdef BUILD_DEPRECATED_PLAYERBOT
-        // Adds functionality to load/unload bots from NPC, also need to apply SQL scripts
-        void LoadBotMenu(Player* pPlayer);
-#endif
-
         bool IsCorpse() const { return GetDeathState() == CORPSE; }
         bool IsDespawned() const { return GetDeathState() == DEAD; }
         void SetCorpseDelay(uint32 delay) { m_corpseDelay = delay; }
@@ -641,7 +639,7 @@ class Creature : public Unit
         bool CanSwim() const override { return (GetCreatureInfo()->InhabitType & INHABIT_WATER) != 0; }
         bool IsSwimming() const { return m_movementInfo.HasMovementFlag(MOVEFLAG_SWIMMING); }
         bool CanFly() const override { return (GetCreatureInfo()->InhabitType & INHABIT_AIR) || m_movementInfo.HasMovementFlag((MovementFlags)(MOVEFLAG_LEVITATING | MOVEFLAG_HOVER | MOVEFLAG_CAN_FLY)); }
-        bool IsFlying() const override { return m_movementInfo.HasMovementFlag((MovementFlags)(MOVEFLAG_FLYING | MOVEFLAG_HOVER | MOVEFLAG_LEVITATING)); }
+        bool IsFlying() const override { return m_movementInfo.HasMovementFlag((MovementFlags)(MOVEFLAG_HOVER | MOVEFLAG_LEVITATING)); }
         bool IsTrainerOf(Player* pPlayer, bool msg) const;
         bool CanInteractWithBattleMaster(Player* pPlayer, bool msg) const;
         bool CanTrainAndResetTalentsOf(Player* pPlayer) const;
@@ -774,9 +772,12 @@ class Creature : public Unit
         void CallForHelp(float radius);
         void CallAssistance();
         void CallAssistance(Unit* enemy);
+        std::pair<bool, GuidVector> MarkCallAssistanceOnPull(Unit* enemy);
+        void CallAssistanceOnPull(Unit* enemy, GuidVector const& receiverList);
         void SetNoCallAssistance(bool val) { m_AlreadyCallAssistance = val; }
+        bool GetNoCallAssistance() { return m_AlreadyCallAssistance; }
         bool CanAssistTo(const Unit* u, const Unit* enemy, bool checkfaction = true) const;
-        bool CanInitiateAttack() const;
+        bool CanInitiateAttack() const override;
         bool CanCallForAssistance() const override { return m_canCallForAssistance; }
         void SetCanCallForAssistance(bool state) { m_canCallForAssistance = state; }
         bool IsInGroup(Unit const* other, bool party/* = false*/, bool ignoreCharms/* = false*/) const override;
@@ -902,6 +903,8 @@ class Creature : public Unit
         void RegisterHitBySpell(uint32 spellId);
         void ResetSpellHitCounter();
 
+        uint32 GetNextUpdateTime() override;
+
         HighGuid GetParentHigh() const override { return HIGHGUID_UNIT; }
 
         void Heartbeat() override;
@@ -933,6 +936,9 @@ class Creature : public Unit
         void SetMountInfo(CreatureInfo const* info) override;
 
         void SetModelRunSpeed(float runSpeed) override { m_modelRunSpeed = runSpeed; }
+
+        void SetDelayedPetSpells() { m_delayedPetSpells = true; }
+        void TriggerDelayedPetSpells();
 
         bool IsCombatOnlyStealth() const { return m_combatOnlyStealth; }
         void SetCombatOnlyStealth(bool state) { m_combatOnlyStealth = state; }
@@ -1014,7 +1020,12 @@ class Creature : public Unit
 
         bool m_imposedCooldown;
 
+        bool m_delayedPetSpells;
+
         float m_healthMultiplier;
+        float m_damageMultiplier;
+        float m_baseAP;
+        float m_baseRAP;
 
     private:
         GridReference<Creature> m_gridRef;

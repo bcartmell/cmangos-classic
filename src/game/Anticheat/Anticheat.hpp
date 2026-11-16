@@ -97,6 +97,9 @@ class SessionAnticheatInterface
         virtual void OrderSent(uint16 opcode, uint32 counter) = 0;
         virtual void OrderAck(uint16 opcode, uint32 counter) = 0;
 
+        // an action its client sent for a character that another unit controls (charm, mind control)
+        virtual void CharmedAction(uint16 opcode) = 0;
+
         // warden
         virtual void WardenPacket(WorldPacket &packet) = 0;
 
@@ -279,6 +282,7 @@ class NullSessionAnticheat : public SessionAnticheatInterface
 
         virtual void OrderSent(uint16, uint32) override {}
         virtual void OrderAck(uint16, uint32) override {}
+        virtual void CharmedAction(uint16) override {}
 
         // warden
         virtual void WardenPacket(WorldPacket &) override {}
@@ -300,17 +304,17 @@ class NullSessionAnticheat : public SessionAnticheatInterface
 class NullAnticheatLib : public AnticheatLibInterface
 {
     public:
-        virtual void Reload() {}
-        virtual void Initialize() {}
+        virtual void Reload() override {}
+        virtual void Initialize() override {}
 
-        virtual std::unique_ptr<SessionAnticheatInterface> NewSession(WorldSession *session, const BigNumber &)
+        virtual std::unique_ptr<SessionAnticheatInterface> NewSession(WorldSession *session, const BigNumber &) override
         {
             return std::make_unique<NullSessionAnticheat>(session);
         }
 
         // anti spam
-        virtual bool ValidateGuildName(const std::string &) const { return false; }
-        virtual std::string NormalizeString(const std::string &message, uint32) { return message; }
+        virtual bool ValidateGuildName(const std::string &) const override { return false; }
+        virtual std::string NormalizeString(const std::string &message, uint32) override { return message; }
         virtual void AddMessage(const std::string &, uint32, Player *, Player *) {}
 
         // GM .anticheat command handler
